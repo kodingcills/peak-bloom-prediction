@@ -7,7 +7,7 @@ def sanitize_features(train_path, forecast_path):
     # Forward fill then backward fill for the small gaps in training
     df_train[['ao_30d', 'nao_30d', 'oni_30d']] = df_train.groupby('site')[['ao_30d', 'nao_30d', 'oni_30d']].ffill().bfill().fillna(0)
     df_train.to_csv(train_path, index=False)
-    print(f"✅ Sanitized {train_path}: Missing values removed.")
+    print(f"Sanitized {train_path}: Missing values removed.")
 
     # 2. Sanitize Forecast Data (Persistence + Decay)
     df_forecast = pd.read_csv(forecast_path)
@@ -40,7 +40,7 @@ def sanitize_features(train_path, forecast_path):
     
     df_sanitized = pd.concat(sanitized_frames)
     df_sanitized.to_csv(forecast_path, index=False)
-    print(f"✅ Sanitized {forecast_path}: Persistence Padding & Climatological Decay applied.")
+    print(f"Sanitized {forecast_path}: Persistence Padding & Climatological Decay applied.")
 
 if __name__ == "__main__":
     sanitize_features('features_train.csv', 'features_2026_forecast.csv')

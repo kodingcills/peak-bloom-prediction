@@ -1,1 +1,6 @@
-bio_year
+location,year,prediction
+washingtondc,2026,88
+kyoto,2026,93
+liestal,2026,90
+vancouver,2026,98
+nyc,2026,103
