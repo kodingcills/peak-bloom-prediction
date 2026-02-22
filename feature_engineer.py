@@ -75,7 +75,7 @@ def process_site(site_name, climate_df, lat, cp_threshold, tbase=0):
     
     results = []
     for year, group in climate_df.groupby('bio_year'):
-        if len(group) < 250: continue
+
         group = group.copy().reset_index(drop=True)
         group['doy'] = group['date'].dt.dayofyear
         group['photoperiod'] = group['doy'].apply(lambda d: calculate_photoperiod(lat, d))
@@ -105,13 +105,54 @@ def process_site(site_name, climate_df, lat, cp_threshold, tbase=0):
 def load_teleconnections():
     """ Load AO, NAO, ONI, AMO and calculate rolling anomalies. """
     indices = {}
+    
+    # Load AO and NAO
     for name in ['ao', 'nao']:
         df = pd.read_csv(f'data/external/{name}_daily.csv')
         df['date'] = pd.to_datetime(df['date'])
         df = df.set_index('date')
-        indices[f'{name}_30d'] = df['value'].rolling(30).mean()
-        indices[f'{name}_90d'] = df['value'].rolling(90).mean()
-    # Add more indices as needed (AMO/ONI usually monthly, skip for Sprint 1 complexity)
+        indices[f'{name}_30d'] = df['value'].rolling(30, min_periods=1).mean()
+        indices[f'{name}_90d'] = df['value'].rolling(90, min_periods=1).mean()
+
+    # Load ONI (monthly data, need to convert to daily and interpolate)
+    if os.path.exists('data/external/oni_raw.txt'):
+        # Parse ONI from the fixed-width format
+        # The file has a header line "1950         2025"
+        # and then each data line starts with a year, followed by 12 monthly values
+        
+        # Read the file content, skipping the first line
+        with open('data/external/oni_raw.txt', 'r') as f:
+            lines = f.readlines()[1:] # Skip the first line
+
+        oni_data = []
+        for line in lines:
+            parts = line.strip().split()
+            if not parts: # Skip empty lines
+                continue
+            
+            try:
+                year = int(parts[0])
+                for month_idx, value_str in enumerate(parts[1:], 1):
+                    month = month_idx
+                    value = float(value_str)
+                    oni_data.append({'YEAR': year, 'MONTH': month, 'ANOM': value})
+            except ValueError:
+                # Handle cases where a line might not be fully parsable (e.g., footers or malformed lines)
+                print(f"Skipping malformed ONI line: {line.strip()}")
+                continue
+        
+        oni_df = pd.DataFrame(oni_data)
+        oni_df['date'] = pd.to_datetime(oni_df['YEAR'].astype(str) + '-' + \
+                                      oni_df['MONTH'].astype(str) + '-01')
+        oni_df = oni_df[['date', 'ANOM']].set_index('date')
+        
+        # Upsample to daily and interpolate
+        oni_daily = oni_df.resample('D').asfreq()
+        oni_daily['ANOM'] = oni_daily['ANOM'].interpolate(method='linear', limit_direction='both')
+        
+        indices['oni_30d'] = oni_daily['ANOM'].rolling(30, min_periods=1).mean()
+        indices['oni_90d'] = oni_daily['ANOM'].rolling(90, min_periods=1).mean()
+
     return pd.DataFrame(indices)
 
 def main():
@@ -119,30 +160,34 @@ def main():
     nyc_delta = calculate_nyc_offset('data/USA-NPN_status_intensity_observations_data.csv')
     print(f"NYC Bloom Delta (First-to-Peak): {nyc_delta:.2f} days")
     
-    sites = {
-        'washingtondc': {'lat': 38.85, 'cp_threshold': 45},
-        'kyoto': {'lat': 35.01, 'cp_threshold': 38},
-        'liestal': {'lat': 47.48, 'cp_threshold': 55},
-        'vancouver': {'lat': 49.25, 'cp_threshold': 48},
-        'newyorkcity': {'lat': 40.77, 'cp_threshold': 45}
+    SITE_DEFS = { # Renamed to SITE_DEFS to avoid conflict
+        'washingtondc': {'lat': 38.85, 'cp_threshold': 45, 't_base': 5},
+        'kyoto': {'lat': 35.01, 'cp_threshold': 38, 't_base': 0},
+        'liestal': {'lat': 47.48, 'cp_threshold': 55, 't_base': 0},
+        'vancouver': {'lat': 49.25, 'cp_threshold': 48, 't_base': 5},
+        'newyorkcity': {'lat': 40.77, 'cp_threshold': 45, 't_base': 5}
     }
     
     tele = load_teleconnections()
     all_historical = []
     all_forecast = []
     
-    for site, meta in sites.items():
+    for site, meta in SITE_DEFS.items(): # Use SITE_DEFS here
         print(f"Processing {site}...")
         hist_file = f'data/{site}_historical_climate.csv'
         norm_file = f'data/{site}_climatology_normals.csv'
         
         if not os.path.exists(hist_file): continue
         df_hist = pd.read_csv(hist_file)
-        df_processed = process_site(site, df_hist, meta['lat'], meta['cp_threshold'])
+        # Pass t_base to process_site
+        df_processed = process_site(site, df_hist, meta['lat'], meta['cp_threshold'], meta['t_base'])
         
         # Merge teleconnections
         df_processed = df_processed.merge(tele, left_on='date', right_index=True, how='left')
         
+        # Debug: Check bio_years present in df_processed
+        print(f"  Bio_years in df_processed for {site}: {df_processed['bio_year'].unique()}")
+
         # Train: All bio-years up to 2024
         all_historical.append(df_processed[df_processed['bio_year'] < 2025])
         
@@ -150,18 +195,8 @@ def main():
         # Current data up to Feb 21, 2026 (Bio-year 2025)
         df_2026 = df_processed[df_processed['bio_year'] == 2025].copy()
         
-        # Bridge with Normals if missing dates up to May 31
-        last_date = df_2026['date'].max()
-        if last_date < pd.Timestamp('2026-05-31') and os.path.exists(norm_file):
-            df_norm = pd.read_csv(norm_file)
-            df_norm['date'] = pd.to_datetime(df_norm['date'])
-            # Shift normals to 2026
-            df_norm['date'] = df_norm['date'].apply(lambda d: d.replace(year=2026))
-            bridge = df_norm[df_norm['date'] > last_date].copy()
-            bridge['bio_year'] = 2025
-            bridge = process_site(site, pd.concat([df_2026[['date','TMIN','TMAX']], bridge[['date','TMIN','TMAX']]]), meta['lat'], meta['cp_threshold'])
-            df_2026 = bridge[bridge['bio_year'] == 2025]
-        
+        # Debug: Check if df_2026 is empty
+        print(f"  df_2026 for {site} is empty: {df_2026.empty}")        
         all_forecast.append(df_2026)
 
     pd.concat(all_historical).to_csv('features_train.csv', index=False)
