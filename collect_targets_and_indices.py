@@ -19,7 +19,7 @@ def download_file(url, local_path):
 def main():
     os.makedirs('data/external', exist_ok=True)
     
-    # 1. Collection: Historical Bloom Targets (GitHub)
+    # Collects Historical Bloom Targets (GitHub)
     bloom_urls = {
         "washingtondc": "https://raw.githubusercontent.com/jandot/cherry-blossoms/main/data/washingtondc.csv",
         "kyoto": "https://raw.githubusercontent.com/jandot/cherry-blossoms/main/data/kyoto.csv",
@@ -28,22 +28,22 @@ def main():
         "nyc": "https://raw.githubusercontent.com/jandot/cherry-blossoms/main/data/nyc.csv"
     }
     
-    print("--- Collecting Historical Bloom Targets ---")
+    print("Collecting Historical Bloom Targets")
     for city, url in bloom_urls.items():
         download_file(url, f"data/{city}.csv")
 
-    # 2. Collection: Macro-Climate Indices (NOAA PSL)
+    # Collects Macro-Climate Indices (NOAA PSL)
     # ONI (El Niño) and AMO (Atlantic Oscillation)
     indices_urls = {
         "oni": "https://psl.noaa.gov/data/correlation/oni.data",
         "amo": "https://psl.noaa.gov/data/correlation/amon.us.long.data"
     }
     
-    print("\n--- Collecting Macro-Climate Indices ---")
+    print("\nCollecting Macro-Climate Indices")
     for index, url in indices_urls.items():
         download_file(url, f"data/external/{index}_raw.txt")
 
-    print("\n--- STAGE 1 COMPLETE ---")
+    print("\nSTAGE 1 COMPLETE")
 
 if __name__ == "__main__":
     main()

@@ -18,7 +18,7 @@ def patch_city_data(city):
         print(f"File missing for {city}. Skipping.")
         return
 
-    # 1. Load existing data and find the gap
+    # Load existing data and find the gap
     df = pd.read_csv(filepath)
     df['date'] = pd.to_datetime(df['date'])
     last_date = df['date'].max()
@@ -33,7 +33,7 @@ def patch_city_data(city):
     
     print(f"[{city.upper()}] Patching missing data from {start_patch} to {end_patch}...")
 
-    # 2. Fetch from Open-Meteo Archive API (No API key required)
+    # Fetch from Open-Meteo Archive API (No API key required)
     lat, lon = COORDS[city]["lat"], COORDS[city]["lon"]
     url = (f"https://archive-api.open-meteo.com/v1/archive?"
            f"latitude={lat}&longitude={lon}&"
@@ -46,7 +46,7 @@ def patch_city_data(city):
         response.raise_for_status()
         data = response.json()
         
-        # 3. Format to match NOAA schema
+        # Format to match NOAA schema
         patch_df = pd.DataFrame({
             'date': pd.to_datetime(data['daily']['time']),
             'TMAX': data['daily']['temperature_2m_max'],
@@ -55,7 +55,7 @@ def patch_city_data(city):
             'PRCP': data['daily']['precipitation_sum'] # in mm, matches NOAA metric
         })
         
-        # 4. Append and Save
+        # Save
         combined_df = pd.concat([df, patch_df], ignore_index=True)
         combined_df = combined_df.sort_values('date').drop_duplicates(subset=['date'], keep='last')
         combined_df.to_csv(filepath, index=False)
@@ -67,4 +67,4 @@ def patch_city_data(city):
 if __name__ == "__main__":
     for city in COORDS.keys():
         patch_city_data(city)
-    print("\n--- PATCH COMPLETE ---")
+    print("\nPATCH COMPLETE")

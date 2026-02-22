@@ -6,7 +6,6 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
 
-# Configuration
 NOAA_API_KEY = os.getenv("NOAA")
 
 if not NOAA_API_KEY:
@@ -44,7 +43,7 @@ def fetch_data_chunk(station_id, start_date, end_date):
                     return pd.DataFrame(data['results'])
                 else:
                     return pd.DataFrame() # No data for this period
-            elif response.status_code == 429: # Rate limit
+            elif response.status_code == 429: 
                 time.sleep((2 ** attempt) + 1)
             else:
                 print(f"Error {response.status_code}: {response.text}")
@@ -108,10 +107,9 @@ def process_station(location_name, station_id, start_year, end_year):
     return df
 
 def main():
-    # Ensure data directory exists
     os.makedirs('data', exist_ok=True)
     
-    # We want data from 1950 (or earliest available) to current year
+    # Want data from 1950 (or earliest available) to current year
     current_year = date.today().year
     start_year = 1950
     

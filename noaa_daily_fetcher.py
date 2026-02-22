@@ -4,7 +4,7 @@ from datetime import date
 
 def audit_data_completeness():
     cities = ["washingtondc", "kyoto", "liestal", "vancouver", "newyorkcity"]
-    print("--- DATA INTEGRITY AUDIT ---")
+    print("DATA INTEGRITY AUDIT")
     
     for city in cities:
         file = f"data/{city}_historical_climate.csv"
@@ -17,11 +17,11 @@ def audit_data_completeness():
             print(f"  - Records: {len(df)}")
             print(f"  - Last Observation: {last_date.date()}")
             if days_missing > 1:
-                print(f"  - ⚠️ MISSING: {days_missing} days (Winter 2025-26 signal is incomplete)")
+                print(f"  - missing: {days_missing} days (Winter 2025-26 signal is incomplete)")
             else:
-                print(f"  - ✅ UP TO DATE")
+                print(f"  - up to date")
         else:
-            print(f"[{city.upper()}] ❌ FILE MISSING")
+            print(f"[{city.upper()}] file missing")
 
 if __name__ == "__main__":
     audit_data_completeness()

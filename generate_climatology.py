@@ -19,7 +19,7 @@ def generate_city_normals(city):
     recent_df['doy'] = recent_df['date'].dt.dayofyear
     
     # Group by DOY and calculate mean
-    # We use 'median' for PRCP because precipitation is highly skewed
+    # Use 'median' for PRCP because precipitation is highly skewed
     normals = recent_df.groupby('doy').agg({
         'TMAX': 'mean',
         'TMIN': 'mean',
@@ -37,7 +37,7 @@ def generate_city_normals(city):
 
     output_path = f"data/{city}_climatology_normals.csv"
     normals.to_csv(output_path, index=False)
-    print(f" ✅ Saved modern normals to {output_path}")
+    print(f"Saved modern normals to {output_path}")
 
 if __name__ == "__main__":
     cities = ["washingtondc", "kyoto", "liestal", "vancouver", "newyorkcity"]
