@@ -80,6 +80,9 @@ def validate_data_contract(df, site):
         print(f"  [Info] {site}: Fahrenheit detected (Max > 60). Converting.")
         for col in ['TAVG', 'TMAX', 'TMIN']:
             df[col] = (df[col] - 32) * 5/9
+        # Reslice to check the newly converted values
+        warm_window = df[df['month'].isin([6, 7, 8, 9])]
+        if warm_window.empty: warm_window = df[df['month'].isin([3, 4, 5])]
             
     # Post-conversion check
     if not warm_window.empty:
@@ -162,33 +165,40 @@ def build_hierarchical_model(train_data, site_anchors, sites_map, coords):
     """
     mu_a_anchors = np.array([site_anchors[s] for s in coords['site']])
     
+    # Calculate per-site chill standardization parameters
+    chill_stats = train_data.groupby('site')['chill7_cum_at_bloom'].agg(['mean', 'std']).to_dict('index')
+    
     with pm.Model(coords=coords) as model:
         site_idx = train_data['site'].map(sites_map).values
         
         # 1. Base Heat Requirement (a_site)
-        # Centered on empirical anchors
         offset_raw_a = pm.StudentT('offset_raw_a', nu=3, mu=0, sigma=1, dims='site')
-        sigma_a = pm.HalfNormal('sigma_a', sigma=100)
-        # Global mu_a is absorbed into anchors, but we allow global shift
+        # Tightened sigma_a from 100 to 50
+        sigma_a = pm.HalfNormal('sigma_a', sigma=50)
         mu_global_a = pm.Normal('mu_global_a', mu=0, sigma=50)
         
         a_site = pm.Deterministic('a_site', mu_a_anchors + mu_global_a + offset_raw_a * sigma_a, dims='site')
         
-        # 2. Chill Sensitivity (b_site) - Linear Synergy
-        # High chill -> Lower heat req => b should be negative
-        mu_global_b = pm.Normal('mu_global_b', mu=-1.0, sigma=1.0)
-        sigma_b = pm.HalfNormal('sigma_b', sigma=0.5)
+        # 2. Chill Sensitivity (b_site) - Standardized Scale
+        # Standardization: (chill - mean) / std
+        chill_means = np.array([chill_stats[s]['mean'] for s in train_data['site']])
+        chill_stds = np.array([chill_stats[s]['std'] if chill_stats[s]['std'] > 0 else 1.0 for s in train_data['site']])
+        chill_stdized = (train_data['chill7_cum_at_bloom'].values - chill_means) / chill_stds
+        
+        # With standardized chill (z-score), b represents change in GDD per 1-SD of chill.
+        # Prior centered near 0 or mildly negative.
+        mu_global_b = pm.Normal('mu_global_b', mu=-100.0, sigma=100.0) 
+        sigma_b = pm.HalfNormal('sigma_b', sigma=50.0)
         offset_raw_b = pm.StudentT('offset_raw_b', nu=3, mu=0, sigma=1, dims='site')
         
         b_site = pm.Deterministic('b_site', mu_global_b + offset_raw_b * sigma_b, dims='site')
         
         # 3. Model Prediction (GDD Threshold)
-        # F* = a + b * Chill_at_Bloom
-        F_star = a_site[site_idx] + b_site[site_idx] * train_data['chill7_cum_at_bloom'].values
+        F_star = a_site[site_idx] + b_site[site_idx] * chill_stdized
         
         # 4. Smooth Likelihood
-        # Compare predicted threshold F* to observed GDD accumulation at bloom
-        sigma_obs = pm.HalfNormal('sigma_obs', sigma=100, dims='site')
+        # Tightened sigma_obs from 100 to 50
+        sigma_obs = pm.HalfNormal('sigma_obs', sigma=50, dims='site')
         pm.Normal('obs', mu=F_star, sigma=sigma_obs[site_idx], observed=train_data['gdd0_cum_at_bloom'].values)
         
     return model
@@ -280,14 +290,16 @@ def sanitize_forecast_features(df_forecast, df_train_daily):
             gap_dates = pd.date_range(start=last_obs_date + pd.Timedelta(days=1), end=FORECAST_CUTOFF_DATE)
             gap_df = pd.DataFrame({'date': gap_dates, 'site': site, 'is_observed': False})
             gap_df['month_day'] = gap_df['date'].dt.strftime('%m-%d')
-            gap_df = gap_df.merge(normals[normals['site'] == site], on='month_day', how='left')
+            # Fix: Merge on ['site', 'month_day'] to prevent site column duplication/NaNs
+            gap_df = gap_df.merge(normals, on=['site', 'month_day'], how='left')
             
-            # 7-day Linear Decay Bridge from last observed temp
-            last_temp = sdf.iloc[-1]['TAVG']
+            # 7-day Linear Decay Bridge from last observed values
+            last_vals = sdf.iloc[-1][['TAVG', 'TMAX', 'TMIN']]
             bridge_len = min(7, len(gap_df))
             for i in range(bridge_len):
                 alpha = (i + 1) / (bridge_len + 1)
-                gap_df.loc[i, 'TAVG'] = (1 - alpha) * last_temp + alpha * gap_df.loc[i, 'TAVG']
+                for col in ['TAVG', 'TMAX', 'TMIN']:
+                    gap_df.loc[i, col] = (1 - alpha) * last_vals[col] + alpha * gap_df.loc[i, col]
             
             sdf = pd.concat([sdf, gap_df], ignore_index=True)
             
@@ -295,9 +307,13 @@ def sanitize_forecast_features(df_forecast, df_train_daily):
         pad_dates = pd.date_range(start=FORECAST_CUTOFF_DATE + pd.Timedelta(days=1), end='2026-05-31')
         pad_df = pd.DataFrame({'date': pad_dates, 'site': site, 'is_observed': False})
         pad_df['month_day'] = pad_df['date'].dt.strftime('%m-%d')
-        pad_df = pad_df.merge(normals[normals['site'] == site], on='month_day', how='left')
+        # Fix: Merge on ['site', 'month_day']
+        pad_df = pad_df.merge(normals, on=['site', 'month_day'], how='left')
         
         full_path = pd.concat([sdf, pad_df], ignore_index=True)
+        # Fix: Assert site labels are retained
+        assert not full_path['site'].isna().any(), f"Vanishing site labels detected for {site}"
+        
         full_path['doy'] = full_path['date'].dt.dayofyear
         
         # Teleconnections carry-forward
@@ -404,12 +420,24 @@ def main():
             trace = pm.sample(1000, tune=1000, cores=1, target_accept=0.999, progressbar=False, random_seed=42)
         
         post = trace.posterior.mean(dim=['chain', 'draw'])
+        # Calculate unstandardized parameters for mechanistic simulation
+        chill_stats = train_df.groupby('site')['chill7_cum_at_bloom'].agg(['mean', 'std']).to_dict('index')
         
         # B) Infer t_mech on Train
         t_mech_train = []
         for _, r in train_df.iterrows():
-            path = df_daily[(df_daily['site']==r['site']) & (df_daily['bio_year']==r['bio_year'])]
-            tm = simulate_bloom_doy(path, post['a_site'].sel(site=r['site']).values, post['b_site'].sel(site=r['site']).values)
+            site = r['site']
+            mu_c = chill_stats[site]['mean']
+            sd_c = chill_stats[site]['std'] if chill_stats[site]['std'] > 0 else 1.0
+            
+            b_std = post['b_site'].sel(site=site).values
+            a_std = post['a_site'].sel(site=site).values
+            
+            b_unstd = b_std / sd_c
+            a_unstd = a_std - b_std * (mu_c / sd_c)
+            
+            path = df_daily[(df_daily['site']==site) & (df_daily['bio_year']==r['bio_year'])]
+            tm = simulate_bloom_doy(path, a_unstd, b_unstd)
             t_mech_train.append(tm)
         train_df['t_mech'] = t_mech_train
         train_df['resid'] = train_df['bloom_doy'] - train_df['t_mech']
@@ -419,8 +447,18 @@ def main():
         
         # D) Predict on Test
         for _, r in test_df.iterrows():
-            path = df_daily[(df_daily['site']==r['site']) & (df_daily['bio_year']==r['bio_year'])]
-            tm = simulate_bloom_doy(path, post['a_site'].sel(site=r['site']).values, post['b_site'].sel(site=r['site']).values)
+            site = r['site']
+            mu_c = chill_stats[site]['mean']
+            sd_c = chill_stats[site]['std'] if chill_stats[site]['std'] > 0 else 1.0
+            
+            b_std = post['b_site'].sel(site=site).values
+            a_std = post['a_site'].sel(site=site).values
+            
+            b_unstd = b_std / sd_c
+            a_unstd = a_std - b_std * (mu_c / sd_c)
+            
+            path = df_daily[(df_daily['site']==site) & (df_daily['bio_year']==r['bio_year'])]
+            tm = simulate_bloom_doy(path, a_unstd, b_unstd)
             
             # Residual Features
             bloom_row = path[path['doy'] == int(tm)]
@@ -454,12 +492,23 @@ def main():
         idata = pm.sample(2000, tune=2000, cores=1, target_accept=0.999, progressbar=False, random_seed=2026)
         
     post_f = idata.posterior.mean(dim=['chain', 'draw'])
+    chill_stats_final = final_train.groupby('site')['chill7_cum_at_bloom'].agg(['mean', 'std']).to_dict('index')
     
     # Re-sim mechanics on full set
     t_mech_final = []
     for _, r in final_train.iterrows():
-        path = df_daily[(df_daily['site']==r['site']) & (df_daily['bio_year']==r['bio_year'])]
-        tm = simulate_bloom_doy(path, post_f['a_site'].sel(site=r['site']).values, post_f['b_site'].sel(site=r['site']).values)
+        site = r['site']
+        mu_c = chill_stats_final[site]['mean']
+        sd_c = chill_stats_final[site]['std'] if chill_stats_final[site]['std'] > 0 else 1.0
+        
+        b_std = post_f['b_site'].sel(site=site).values
+        a_std = post_f['a_site'].sel(site=site).values
+        
+        b_unstd = b_std / sd_c
+        a_unstd = a_std - b_std * (mu_c / sd_c)
+        
+        path = df_daily[(df_daily['site']==site) & (df_daily['bio_year']==r['bio_year'])]
+        tm = simulate_bloom_doy(path, a_unstd, b_unstd)
         t_mech_final.append(tm)
     final_train['t_mech'] = t_mech_final
     final_train['resid'] = final_train['bloom_doy'] - final_train['t_mech']
@@ -478,13 +527,20 @@ def main():
         site_path = df_forecast[df_forecast['site'] == site]
         if site_path.empty: continue
         
+        mu_c = chill_stats_final[site]['mean']
+        sd_c = chill_stats_final[site]['std'] if chill_stats_final[site]['std'] > 0 else 1.0
+        
         sims = []
         for _ in range(1000): # Stochastic ensemble
             d, c = np.random.randint(0, post_draws.draw.size), np.random.randint(0, post_draws.chain.size)
-            a = post_draws['a_site'].sel(site=site, draw=d, chain=c).values
-            b = post_draws['b_site'].sel(site=site, draw=d, chain=c).values
             
-            tm = simulate_bloom_doy(site_path, a, b)
+            b_std = post_draws['b_site'].sel(site=site, draw=d, chain=c).values
+            a_std = post_draws['a_site'].sel(site=site, draw=d, chain=c).values
+            
+            b_unstd = b_std / sd_c
+            a_unstd = a_std - b_std * (mu_c / sd_c)
+            
+            tm = simulate_bloom_doy(site_path, a_unstd, b_unstd)
             
             # Residual
             bloom_row = site_path[site_path['doy'] == int(tm)]

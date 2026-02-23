@@ -13,7 +13,7 @@ class TestCompilerGates(unittest.TestCase):
 
     def setUp(self):
         # Create dummy dataframes for testing
-        self.site = 'test_site'
+        self.site = 'washingtondc'
         dates = pd.date_range(start='2020-01-01', end='2020-12-31', freq='D')
         self.df_mock = pd.DataFrame({
             'date': dates,
@@ -27,15 +27,13 @@ class TestCompilerGates(unittest.TestCase):
 
     def test_smart_rescale_tenths(self):
         """ Test if smart_rescale correctly identifies and scales tenths data """
-        # Create tenths data (max < 15.0 in summer)
         df_tenths = self.df_mock.copy()
         df_tenths['TMAX'] = df_tenths['TMAX'] / 10.0
         df_tenths['TMIN'] = df_tenths['TMIN'] / 10.0
         df_tenths['TAVG'] = df_tenths['TAVG'] / 10.0
         
-        # Inject summer data to be sure
         summer_mask = df_tenths['date'].dt.month.isin([7,8])
-        df_tenths.loc[summer_mask, 'TMAX'] = 2.5 # 2.5C in tenths = 25C. Logic checks raw value < 15.
+        df_tenths.loc[summer_mask, 'TMAX'] = 2.5 
         
         scaled_df, was_scaled = ms.smart_rescale(df_tenths, self.site)
         self.assertTrue(was_scaled, "Should have detected tenths scaling")
@@ -44,7 +42,6 @@ class TestCompilerGates(unittest.TestCase):
     def test_smart_rescale_celsius(self):
         """ Test if smart_rescale leaves Celsius data alone """
         df_c = self.df_mock.copy()
-        # Ensure summer max is high enough
         summer_mask = df_c['date'].dt.month.isin([7,8])
         df_c.loc[summer_mask, 'TMAX'] = 30.0 
         
@@ -60,37 +57,65 @@ class TestCompilerGates(unittest.TestCase):
 
     def test_cutoff_enforcement(self):
         """ Test if forecast sanitization strictly cuts off after Feb 28 """
-        # Mock forecast data going into March
         dates = pd.date_range(start='2026-01-01', end='2026-03-15', freq='D')
         df_forecast = pd.DataFrame({
             'date': dates,
-            'site': 'washingtondc', # Must be a valid site key
+            'site': 'washingtondc',
             'TAVG': 10.0, 'TMAX': 15.0, 'TMIN': 5.0,
             'ao_30d': 0, 'nao_30d': 0, 'oni_30d': 0
         })
         
-        # Mock training data for normals
         df_train = self.df_mock.copy()
         df_train['site'] = 'washingtondc'
         
         sanitized = ms.sanitize_forecast_features(df_forecast, df_train)
-        
-        # Check that is_observed is False after Feb 28
         cutoff = pd.to_datetime("2026-02-28")
-        observed_mask = sanitized['date'] <= cutoff
-        
-        # The logic in sanitize_forecast_features marks rows from file as is_observed=True 
-        # IF they are before cutoff. Rows after cutoff come from padding and are False.
-        # However, if the input df has rows after cutoff, they should be DROPPED or Ignored 
-        # in favor of climatology? The code slices: sdf = sdf[sdf['date'] <= FORECAST_CUTOFF_DATE]
         
         self.assertTrue((sanitized[sanitized['date'] > cutoff]['is_observed'] == False).all(), 
                         "Data after cutoff must not be marked observed")
-        
-        # Verify no data from the original 'future' rows leaked in as observed
-        # The original had data up to March 15. The slice should remove them.
-        # The function pads from cutoff+1 to May 31.
         self.assertEqual(sanitized['date'].max(), pd.to_datetime("2026-05-31"))
+
+    def test_site_label_retention(self):
+        """ Test if site labels are retained after padding """
+        df_forecast = pd.DataFrame({
+            'date': pd.to_datetime(['2026-01-01', '2026-02-21']),
+            'site': 'washingtondc',
+            'TAVG': [10.0, 12.0], 'TMAX': [15.0, 17.0], 'TMIN': [5.0, 7.0],
+            'ao_30d': 0, 'nao_30d': 0, 'oni_30d': 0
+        })
+        df_train = self.df_mock.copy()
+        df_train['site'] = 'washingtondc'
+        
+        sanitized = ms.sanitize_forecast_features(df_forecast, df_train)
+        self.assertFalse(sanitized['site'].isna().any(), "Site labels should not be NaN")
+        self.assertTrue((sanitized['site'] == 'washingtondc').all(), "Site labels should remain 'washingtondc'")
+
+    def test_feb_gap_completeness(self):
+        """ Test if the Feb 22-28 gap is filled with valid temps """
+        # Ends on Feb 21
+        df_forecast = pd.DataFrame({
+            'date': pd.to_datetime(['2026-02-20', '2026-02-21']),
+            'site': 'washingtondc',
+            'TAVG': [10.0, 12.0], 'TMAX': [15.0, 17.0], 'TMIN': [5.0, 7.0],
+            'ao_30d': 0, 'nao_30d': 0, 'oni_30d': 0
+        })
+        df_train = self.df_mock.copy()
+        df_train['site'] = 'washingtondc'
+        
+        sanitized = ms.sanitize_forecast_features(df_forecast, df_train)
+        gap = sanitized[(sanitized['date'] >= '2026-02-22') & (sanitized['date'] <= '2026-02-28')]
+        
+        self.assertEqual(len(gap), 7, "Feb gap should have 7 rows")
+        self.assertFalse(gap[['TAVG', 'TMAX', 'TMIN']].isna().any().any(), "Gap temps should not be NaN")
+        self.assertTrue((gap['TMAX'] >= gap['TMIN']).all(), "TMAX must be >= TMIN in gap")
+
+    def test_reachability_sanity(self):
+        """ Test if anchors are reachable by May 31 in mock data """
+        df = ms.compute_bio_thermal_path(self.df_mock)
+        max_gdd = df['gdd0_cum'].max()
+        # Anchor shouldn't be astronomically high
+        anchor = 500.0
+        self.assertGreater(max_gdd, anchor, "Plausible anchor should be reachable by end of year")
 
 if __name__ == '__main__':
     unittest.main()
