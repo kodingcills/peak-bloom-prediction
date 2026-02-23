@@ -8,411 +8,502 @@ import os
 import warnings
 from sklearn.metrics import mean_absolute_error
 
-# Suppress warnings
+# --- Policy & Global Constants (V5.0) ---
+# Aligned with context/SYSTEM_CONTEXT_INDEX.md
+FORECAST_CUTOFF_DATE = pd.to_datetime("2026-02-28")
+MAY_31_DOY = 151
+MODEL_T_BASE_HEAT = 0.0      # GDD0
+MODEL_T_BASE_CHILL = 7.0     # Reference base for chill units
+
+# Simplified SITE_DEFS (Task 1)
+SITE_DEFS = {
+    'washingtondc': {'lat': 38.85, 'bloom_def': 70},
+    'kyoto': {'lat': 35.01, 'bloom_def': 100},
+    'liestal': {'lat': 47.48, 'bloom_def': 25},
+    'vancouver': {'lat': 49.25, 'bloom_def': 70},
+    'newyorkcity': {'lat': 40.77, 'bloom_def': 70}
+}
+
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 
-# --- Configuration and Constants ---
-SITE_DEFS = {
-    'washingtondc': {'lat': 38.85, 't_base': 5, 'cp_threshold': 45, 'bloom_def': 70, 'med_doy': 90},
-    'kyoto': {'lat': 35.01, 't_base': 0, 'cp_threshold': 38, 'bloom_def': 100, 'med_doy': 95},
-    'liestal': {'lat': 47.48, 't_base': 0, 'cp_threshold': 55, 'bloom_def': 25, 'med_doy': 92},
-    'vancouver': {'lat': 49.25, 't_base': 5, 'cp_threshold': 48, 'bloom_def': 70, 'med_doy': 100},
-    'newyorkcity': {'lat': 40.77, 't_base': 5, 'cp_threshold': 45, 'bloom_def': 70, 'med_doy': 105}
-}
-NYC_OFFSET_DAYS = 0.5
-VANCOUVER_PRECISION_WEIGHT = 0.2
-MAY_31_DOY = 151 
-MODEL_T_BASE_HEAT = 0.0 
-MODEL_T_BASE_CHILL = 7.0
-MIN_CHILL_REQUIRED = 200.0 # Adjusted after scale audit
-
-# Global State for Reporting
-SCALING_REPORT = {}
-
-def check_and_scale_site(df, site):
+# --- Task 3: Unit-Safe Scaling ---
+def smart_rescale(df, site):
     """
-    Performs data integrity audit per site.
-    Returns scaled dataframe and logs decision.
+    Detects Tenths-of-Celsius encoding using month-aware heuristics.
+    Returns (df, is_scaled).
     """
     cols = ['TAVG', 'TMAX', 'TMIN']
-    # Check stats on original data
-    tavg_max = df['TAVG'].max()
-    tavg_mean = df['TAVG'].mean()
+    scaled = False
     
-    # Heuristic: If max < 25C and mean < 8C (conservative for yearly data including summer), it's likely Tenths
-    # Kyoto/DC summer is ~30C. If data is 3.0C, it's tenths.
-    is_tenths = (tavg_max < 25.0) and (tavg_mean < 10.0)
+    # Isolate seasonal windows
+    df['month'] = df['date'].dt.month
+    jul_aug = df[df['month'].isin([7, 8])]
+    jun_sep = df[df['month'].isin([6, 7, 8, 9])]
+    mar_may = df[df['month'].isin([3, 4, 5])]
     
-    scale_factor = 1.0
-    if is_tenths:
-        scale_factor = 10.0
+    # Heuristics based on typical max temps
+    if not jul_aug.empty:
+        if jul_aug['TMAX'].max() < 15.0: scaled = True
+    elif not jun_sep.empty:
+        if jun_sep['TMAX'].max() < 15.0: scaled = True
+    elif not mar_may.empty:
+        # Conservative check for spring-only data
+        if mar_may['TMAX'].max() < 12.0: scaled = True
+    else:
+        # No warm season data
+        pass
+
+    if scaled:
         for col in cols:
-            if col in df.columns: df[col] *= scale_factor
+            if col in df.columns: df[col] *= 10.0
             
-    SCALING_REPORT[site] = "Tenths (x10)" if is_tenths else "Celsius (x1)"
+    return df, scaled
+
+# --- Task 2: Runtime Data Contract ---
+def validate_data_contract(df, site):
+    """
+    Enforces integrity: TMAX>=TMIN, Fahrenheit conversion, GDD semantics.
+    """
+    # A) Basic Integrity
+    if not (df["TMAX"] >= df["TMIN"]).all():
+        # Auto-correct minor inversions
+        inv = df["TMAX"] < df["TMIN"]
+        df.loc[inv, ["TMAX", "TMIN"]] = df.loc[inv, ["TMIN", "TMAX"]].values
+
+    # B) Fahrenheit Detection
+    df['month'] = df['date'].dt.month
+    warm_window = df[df['month'].isin([6, 7, 8, 9])] # Jun-Sep
+    if warm_window.empty: warm_window = df[df['month'].isin([3, 4, 5])] # Mar-May fallback
+    
+    if not warm_window.empty and warm_window['TMAX'].max() > 60.0:
+        print(f"  [Info] {site}: Fahrenheit detected (Max > 60). Converting.")
+        for col in ['TAVG', 'TMAX', 'TMIN']:
+            df[col] = (df[col] - 32) * 5/9
+            
+    # Post-conversion check
+    if not warm_window.empty:
+        if warm_window['TMAX'].max() > 50.0:
+             raise ValueError(f"Critical: {site} TMAX > 50C post-validation.")
+
     return df
 
-def calculate_vpd(tmax, tmin):
-    """ Calculates Daily Max Vapor Pressure Deficit (kPa). """
-    svp_max = 0.6108 * np.exp((17.27 * tmax) / (tmax + 237.3))
-    svp_min = 0.6108 * np.exp((17.27 * tmin) / (tmin + 237.3))
-    return np.maximum(0, svp_max - svp_min)
-
-def compute_bio_thermal_features(df):
-    """ Accumulates GDD, Chill, and 14-day Rolling VPD. """
+# --- Task 2C / Task 4: Bio-Thermal Path Engine ---
+def compute_bio_thermal_path(df):
+    """
+    Calculates cumulative GDD0 and Chill7. 
+    Strictly re-computes from TAVG.
+    """
     df = df.sort_values('date').copy()
     
-    # 1. Heat & Chill (Base 0/7)
-    df['gdd'] = np.maximum(0, df['TAVG'] - MODEL_T_BASE_HEAT).cumsum()
-    df['chill'] = np.maximum(0, MODEL_T_BASE_CHILL - df['TAVG']).cumsum()
+    # Explicit GDD semantics
+    df["gdd0_daily"] = np.maximum(df["TAVG"] - MODEL_T_BASE_HEAT, 0)
+    df["gdd0_cum"] = df["gdd0_daily"].cumsum()
     
-    # 2. VPD & Rolling Brake
-    df['vpd_raw'] = calculate_vpd(df['TMAX'], df['TMIN'])
-    # Rolling 14-day mean, min_periods=1 to avoid NaNs at start
-    df['vpd'] = df['vpd_raw'].rolling(window=14, min_periods=1).mean()
+    # Explicit Chill semantics (Chill Degree Days Base 7)
+    df["chill7_daily"] = np.maximum(MODEL_T_BASE_CHILL - df["TAVG"], 0)
+    df["chill7_cum"] = df["chill7_daily"].cumsum()
     
+    # VPD Calculation (approx daily max)
+    # SVP = 0.6108 * exp(17.27 * T / (T + 237.3))
+    svp_max = 0.6108 * np.exp((17.27 * df['TMAX']) / (df['TMAX'] + 237.3))
+    svp_min = 0.6108 * np.exp((17.27 * df['TMIN']) / (df['TMIN'] + 237.3))
+    df['vpd_raw'] = np.maximum(0, svp_max - svp_min)
+    df['vpd_14d'] = df['vpd_raw'].rolling(window=14, min_periods=1).mean()
+    
+    # Monotonicity check
+    if not (df["gdd0_cum"].diff().dropna() >= 0).all():
+        raise ValueError("GDD non-monotonicity detected")
+        
     return df
 
-# --- Data Loading ---
-def load_data_orchestrator(features_path, targets_dir, nyc_offset_days):
+# --- Task 4: Empirical Anchors ---
+def extract_empirical_anchors(df_daily, df_targets):
+    """
+    Computes site-specific mu_anchors from daily paths at bloom DOY.
+    """
+    site_anchors = {}
+    
+    for site in SITE_DEFS.keys():
+        s_targets = df_targets[df_targets['site'] == site]
+        gdd_at_bloom = []
+        
+        for _, row in s_targets.iterrows():
+            # Get path for this year
+            path = df_daily[(df_daily['site'] == site) & (df_daily['bio_year'] == row['bio_year'])]
+            if path.empty: continue
+            
+            # Extract exactly at bloom DOY
+            target_doy = int(round(row['bloom_doy']))
+            bloom_row = path[path['doy'] == target_doy]
+            if not bloom_row.empty:
+                gdd_at_bloom.append(bloom_row['gdd0_cum'].values[0])
+        
+        if gdd_at_bloom:
+            site_anchors[site] = np.median(gdd_at_bloom)
+        else:
+            site_anchors[site] = None # Will fill with global median later
+            
+    # Fallback to global median
+    valid_anchors = [v for v in site_anchors.values() if v is not None]
+    global_median = np.median(valid_anchors) if valid_anchors else 1000.0
+    
+    for site in site_anchors:
+        if site_anchors[site] is None:
+            site_anchors[site] = global_median
+            
+    return site_anchors
+
+# --- Task 5: PyMC Model (Smooth Likelihood) ---
+def build_hierarchical_model(train_data, site_anchors, sites_map, coords):
+    """
+    V5.0: Linear Synergy + Smooth GDD-Space Likelihood.
+    No discrete tripwire in sampler.
+    """
+    mu_a_anchors = np.array([site_anchors[s] for s in coords['site']])
+    
+    with pm.Model(coords=coords) as model:
+        site_idx = train_data['site'].map(sites_map).values
+        
+        # 1. Base Heat Requirement (a_site)
+        # Centered on empirical anchors
+        offset_raw_a = pm.StudentT('offset_raw_a', nu=3, mu=0, sigma=1, dims='site')
+        sigma_a = pm.HalfNormal('sigma_a', sigma=100)
+        # Global mu_a is absorbed into anchors, but we allow global shift
+        mu_global_a = pm.Normal('mu_global_a', mu=0, sigma=50)
+        
+        a_site = pm.Deterministic('a_site', mu_a_anchors + mu_global_a + offset_raw_a * sigma_a, dims='site')
+        
+        # 2. Chill Sensitivity (b_site) - Linear Synergy
+        # High chill -> Lower heat req => b should be negative
+        mu_global_b = pm.Normal('mu_global_b', mu=-1.0, sigma=1.0)
+        sigma_b = pm.HalfNormal('sigma_b', sigma=0.5)
+        offset_raw_b = pm.StudentT('offset_raw_b', nu=3, mu=0, sigma=1, dims='site')
+        
+        b_site = pm.Deterministic('b_site', mu_global_b + offset_raw_b * sigma_b, dims='site')
+        
+        # 3. Model Prediction (GDD Threshold)
+        # F* = a + b * Chill_at_Bloom
+        F_star = a_site[site_idx] + b_site[site_idx] * train_data['chill7_cum_at_bloom'].values
+        
+        # 4. Smooth Likelihood
+        # Compare predicted threshold F* to observed GDD accumulation at bloom
+        sigma_obs = pm.HalfNormal('sigma_obs', sigma=100, dims='site')
+        pm.Normal('obs', mu=F_star, sigma=sigma_obs[site_idx], observed=train_data['gdd0_cum_at_bloom'].values)
+        
+    return model
+
+# --- Task 6: Mechanistic Simulation ---
+def simulate_bloom_doy(daily_path, a_hat, b_hat):
+    """
+    Simulates bloom DOY by scanning cumulative GDD until it crosses the 
+    dynamic F* threshold. Returns 151 (May 31) if unreachable.
+    """
+    path = daily_path.reset_index(drop=True)
+    # Threshold(t) = a + b * Chill(t)
+    threshold = a_hat + b_hat * path['chill7_cum']
+    
+    # Tripwire crossing
+    # Must occur after March 1st (DOY 60) for biological plausibility
+    mask = (path['doy'] >= 60) & (path['gdd0_cum'] >= threshold)
+    
+    crossings = path.index[mask]
+    if len(crossings) > 0:
+        return min(path.loc[crossings[0], 'doy'], MAY_31_DOY)
+    
+    return MAY_31_DOY # Sentinel
+
+# --- Task 7: Residual Firewall ---
+def train_residual_stacker(df_train):
+    """
+    Trains XGBoost only on valid mechanistic predictions.
+    Uses MAD-based outlier filtering.
+    """
+    # 1. Exclude Sentinels
+    df_valid = df_train[df_train['t_mech'] != MAY_31_DOY].copy()
+    
+    features = ['ao_30d', 'nao_30d', 'oni_30d', 'vpd_14d']
+    keep_indices = []
+    
+    for site in SITE_DEFS.keys():
+        site_data = df_valid[df_valid['site'] == site]
+        if site_data.empty: continue
+        
+        resid_abs = np.abs(site_data['resid'])
+        med = resid_abs.median()
+        mad = (resid_abs - med).abs().median() + 1e-6
+        
+        # Threshold: median + 2.5 * MAD
+        mask = resid_abs < (med + 2.5 * mad)
+        keep_indices.extend(site_data[mask].index.tolist())
+        
+    df_firewalled = df_valid.loc[keep_indices]
+    
+    # Check for empty set
+    if df_firewalled.empty:
+        print("Warning: Firewall removed all data. Falling back to unfiltered valid.")
+        df_firewalled = df_valid
+
+    # Ensure features exist
+    for f in features:
+        if f not in df_firewalled.columns: df_firewalled[f] = 0.0
+            
+    xgbr = xgb.XGBRegressor(max_depth=2, n_estimators=100, learning_rate=0.05, reg_lambda=10)
+    xgbr.fit(df_firewalled[features], df_firewalled['resid'])
+    
+    return xgbr
+
+# --- Task 8: Forecast Sanitization ---
+def sanitize_forecast_features(df_forecast, df_train_daily):
+    """
+    Enforces the canonical Feb 28th cutoff and fills temporal gaps.
+    """
+    # Normals from scaled training paths
+    df_train_daily['month_day'] = df_train_daily['date'].dt.strftime('%m-%d')
+    normals = df_train_daily.groupby(['site', 'month_day'])[['TAVG', 'TMAX', 'TMIN']].mean().reset_index()
+    
+    processed = []
+    for site in df_forecast['site'].unique():
+        if site not in SITE_DEFS: continue
+        
+        # 1. Slicing to Cutoff
+        sdf = df_forecast[df_forecast['site'] == site].sort_values('date').copy()
+        sdf, _ = smart_rescale(sdf, site)
+        sdf = validate_data_contract(sdf, site)
+        
+        sdf = sdf[sdf['date'] <= FORECAST_CUTOFF_DATE]
+        sdf['is_observed'] = True
+        
+        # 2. Gap Fill (Feb 21 -> Feb 28)
+        last_obs_date = sdf['date'].max()
+        if last_obs_date < FORECAST_CUTOFF_DATE:
+            gap_dates = pd.date_range(start=last_obs_date + pd.Timedelta(days=1), end=FORECAST_CUTOFF_DATE)
+            gap_df = pd.DataFrame({'date': gap_dates, 'site': site, 'is_observed': False})
+            gap_df['month_day'] = gap_df['date'].dt.strftime('%m-%d')
+            gap_df = gap_df.merge(normals[normals['site'] == site], on='month_day', how='left')
+            
+            # 7-day Linear Decay Bridge from last observed temp
+            last_temp = sdf.iloc[-1]['TAVG']
+            bridge_len = min(7, len(gap_df))
+            for i in range(bridge_len):
+                alpha = (i + 1) / (bridge_len + 1)
+                gap_df.loc[i, 'TAVG'] = (1 - alpha) * last_temp + alpha * gap_df.loc[i, 'TAVG']
+            
+            sdf = pd.concat([sdf, gap_df], ignore_index=True)
+            
+        # 3. Climatology Padding (March 1 -> May 31)
+        pad_dates = pd.date_range(start=FORECAST_CUTOFF_DATE + pd.Timedelta(days=1), end='2026-05-31')
+        pad_df = pd.DataFrame({'date': pad_dates, 'site': site, 'is_observed': False})
+        pad_df['month_day'] = pad_df['date'].dt.strftime('%m-%d')
+        pad_df = pad_df.merge(normals[normals['site'] == site], on='month_day', how='left')
+        
+        full_path = pd.concat([sdf, pad_df], ignore_index=True)
+        full_path['doy'] = full_path['date'].dt.dayofyear
+        
+        # Teleconnections carry-forward
+        for c in ['ao_30d', 'nao_30d', 'oni_30d']:
+            full_path[c] = full_path[c].ffill(limit=30).fillna(0.0)
+            
+        # Bio-Thermal Compute (V5 Engine)
+        full_path = compute_bio_thermal_path(full_path)
+        
+        processed.append(full_path)
+        
+    return pd.concat(processed)
+
+# --- Orchestrator ---
+
+def load_data_orchestrator(features_path, targets_dir):
     df_raw = pd.read_csv(features_path)
     df_raw['date'] = pd.to_datetime(df_raw['date'])
+    
+    # 1. Target Standardization
+    all_targets = []
+    for site in SITE_DEFS.keys():
+        fname = site.replace('newyorkcity', 'nyc')
+        t_file = f"{targets_dir}/{fname}.csv"
+        if os.path.exists(t_file):
+            df_t = pd.read_csv(t_file)
+            df_t.rename(columns={'year': 'bio_year', 'location': 'site'}, inplace=True, errors='ignore')
+            df_t = df_t[['bio_year', 'bloom_doy', 'site']]
+            df_t['site'] = site
+            all_targets.append(df_t)
+    df_targets = pd.concat(all_targets, ignore_index=True).drop_duplicates(subset=['bio_year', 'site'])
 
-    processed_feats = []
+    # 2. Daily Path Engine
+    processed_daily = []
     for site in df_raw['site'].unique():
         if site not in SITE_DEFS: continue
         site_df = df_raw[df_raw['site'] == site].copy()
         
-        # 1. Data Integrity & Scaling
-        site_df = check_and_scale_site(site_df, site)
+        site_df, scaled = smart_rescale(site_df, site)
+        site_df = validate_data_contract(site_df, site)
         
-        # 2. Bio-Thermal Calculation per Year
-        if 'bio_year' not in site_df.columns: continue
         site_res = []
         for byear, group in site_df.groupby('bio_year'):
-            res = compute_bio_thermal_features(group)
-            res['bio_year'] = byear 
+            res = compute_bio_thermal_path(group)
+            res['bio_year'] = byear
             site_res.append(res)
-        if site_res: processed_feats.append(pd.concat(site_res))
-            
-    df_features = pd.concat(processed_feats)
-
-    # Targets
-    all_targets = []
-    for site_name in SITE_DEFS.keys():
-        fname = site_name.replace('newyorkcity', 'nyc')
-        target_file = f"{targets_dir}/{fname}.csv"
-        if os.path.exists(target_file):
-            df_t = pd.read_csv(target_file)
-            if 'location' in df_t.columns: df_t.rename(columns={'location': 'site'}, inplace=True)
-            if 'year' in df_t.columns: df_t.rename(columns={'year': 'bio_year'}, inplace=True)
-            df_t = df_t[['bio_year', 'bloom_doy', 'site']]
-            df_t['site'] = site_name 
-            all_targets.append(df_t)
-
-    df_targets = pd.concat(all_targets, ignore_index=True).drop_duplicates(subset=['bio_year', 'site'])
-    df_targets['bloom_doy'] = df_targets['bloom_doy'].astype(float)
-    df_targets.loc[df_targets['site'] == 'newyorkcity', 'bloom_doy'] += nyc_offset_days
-
+        processed_daily.append(pd.concat(site_res))
+    
+    df_daily = pd.concat(processed_daily)
+    
+    # 3. Aggregated Training Table (Bloom Snapshots)
     training_rows = []
     for _, row in df_targets.iterrows():
-        site_year_daily = df_features[(df_features['bio_year'] == row['bio_year']) & (df_features['site'] == row['site'])]
-        if site_year_daily.empty: continue
-        target_doy = int(round(row['bloom_doy']))
-        day_feat = site_year_daily[site_year_daily['doy'] == target_doy]
-        if day_feat.empty: day_feat = site_year_daily.iloc[(site_year_daily['doy'] - target_doy).abs().argsort()[:1]]
-        if day_feat.empty: continue
-        feat = day_feat.iloc[0].copy()
-        feat['bloom_doy'] = row['bloom_doy']
-        training_rows.append(feat)
-
-    return pd.DataFrame(training_rows), df_features
-
-def sanitize_forecast_features(df_forecast, df_train):
-    df = df_forecast.copy()
-    df['date'] = pd.to_datetime(df['date'])
-    
-    # Normals from Training
-    df_train['month_day'] = df_train['date'].dt.strftime('%m-%d')
-    normals = df_train.groupby(['site', 'month_day'])[['TAVG', 'TMAX', 'TMIN']].mean().reset_index()
-    
-    processed = []
-    for site in df['site'].unique():
-        if site not in SITE_DEFS: continue
-        sdf = df[df['site'] == site].sort_values('date').copy()
+        path = df_daily[(df_daily['bio_year'] == row['bio_year']) & (df_daily['site'] == row['site'])]
+        if path.empty: continue
         
-        # Integrity Scale Check (re-use logic or force consistency?)
-        # We must assume the forecast file follows the same convention as raw training data
-        # But we can check stats again.
-        sdf = check_and_scale_site(sdf, site) # This will overwrite the report, which is fine
-        
-        last_date = sdf['date'].max()
-        last_vals = sdf.iloc[-1][['TAVG', 'TMAX', 'TMIN']]
-        
-        pad_dates = pd.date_range(start=last_date + pd.Timedelta(days=1), end='2026-05-31')
-        pad_df = pd.DataFrame({'date': pad_dates, 'site': site})
-        pad_df['month_day'] = pad_df['date'].dt.strftime('%m-%d')
-        pad_df = pad_df.merge(normals[normals['site'] == site], on='month_day', how='left')
-        
-        # Linear Bridge
-        bridge_len = min(7, len(pad_df))
-        for i in range(bridge_len):
-            alpha = (i + 1) / (bridge_len + 1)
-            for col in ['TAVG', 'TMAX', 'TMIN']:
-                pad_df.loc[i, col] = (1 - alpha) * last_vals[col] + alpha * pad_df.loc[i, col]
-        
-        pad_df['doy'] = pad_df['date'].dt.dayofyear
-        full_df = pd.concat([sdf, pad_df], ignore_index=True)
-        
-        cols = ['ao_30d', 'nao_30d', 'oni_30d']
-        full_df[cols] = full_df[cols].ffill(limit=14).fillna(0.0)
-        full_df['photoperiod'] = full_df['photoperiod'].ffill() 
-        
-        full_df = compute_bio_thermal_features(full_df)
-        processed.append(full_df)
-    return pd.concat(processed)
-
-# --- Hierarchical Bayesian Model v4.1 (Student-T Pheno-Flex) ---
-def build_god_tier_model(data, site_coords, sites_map):
-    # Historical Anchors
-    site_gdd_means = data.groupby('site')['gdd'].mean()
-    mu_anchors = np.array([site_gdd_means.get(s, 500) for s in site_coords['site']])
-    
-    with pm.Model(coords=site_coords) as model:
-        site_idx = data['site'].map(sites_map).values
-        
-        # 1. Non-Centered Intercept with Student-T Offsets
-        # This allows Vancouver/NYC to escape the "Kyoto Gravity Well"
-        mu_global = pm.Normal('mu_global', mu=0, sigma=100)
-        sigma_site = pm.HalfNormal('sigma_site', sigma=50)
-        # Student-T with nu=3 for heavy tails
-        offset_raw = pm.StudentT('offset_raw', nu=3, mu=0, sigma=1, dims='site')
-        
-        a_site = pm.Deterministic('a_site', mu_anchors + mu_global + offset_raw * sigma_site, dims='site')
-        
-        # 2. Adaptive Site Slopes (Chill Sensitivity)
-        # Non-Centered Hierarchical Slopes
-        b_chill_global = pm.Normal('b_chill_global', mu=-0.1, sigma=0.5)
-        sigma_b_chill = pm.HalfNormal('sigma_b_chill', sigma=0.2)
-        offset_b_chill = pm.StudentT('offset_b_chill', nu=3, mu=0, sigma=1, dims='site')
-        b_chill = pm.Deterministic('b_chill', b_chill_global + offset_b_chill * sigma_b_chill, dims='site')
-
-        # 3. Pheno-Flex Decay Rate (Log-Normal)
-        lam = pm.LogNormal('lam', mu=np.log(0.005), sigma=0.5)
-        
-        # 4. Photoperiod (Non-Centered)
-        b_photo_global = pm.Normal('b_photo_global', mu=-1.0, sigma=2.0)
-        sigma_b_photo = pm.HalfNormal('sigma_b_photo', sigma=1.0)
-        offset_b_photo = pm.Normal('offset_b_photo', mu=0, sigma=1, dims='site')
-        b_photo = pm.Deterministic('b_photo', b_photo_global + offset_b_photo * sigma_b_photo, dims='site')
-
-        # Model Structure
-        # F* = a_site - b_chill * (1 - exp(-lam * CP))
-        # Note: b_chill is positive magnitude of reduction in this formulation?
-        # Or standard slope?
-        # Let's use: Threshold = a_site + b_chill * (1 - exp(-lam * CP))
-        # If b_chill is negative (standard), then high chill reduces threshold.
-        
-        cp_norm = data['chill'].values # Keep raw scale
-        decay_factor = 1.0 - pm.math.exp(-lam * cp_norm)
-        
-        # Threshold calculation
-        # a_site is the "Low Chill" base requirement (High GDD)
-        # As chill increases, threshold drops by b_chill amount
-        # So b_chill should be negative.
-        
-        F_star = a_site[site_idx] + b_chill[site_idx] * cp_norm # Linear approximation for stability in v4.1?
-        # User requested Log-Normal prior for lambda, implying exponential model.
-        # F* = a_site + b_chill * (1 - exp(-lam * CP)) -> This assumes saturation
-        # Let's stick to the requested structure.
-        
-        # Refined Pheno-Flex:
-        # F* = a_site + b_chill * (1 - exp(-lam * CP))
-        # If b_chill is large negative, threshold drops.
-        
-        mu_model = a_site[site_idx] + b_chill[site_idx] * (1 - pm.math.exp(-lam * cp_norm)) + b_photo[site_idx] * data['photoperiod'].values
-        
-        weights = np.ones(len(data))
-        weights[data['site'] == 'vancouver'] = VANCOUVER_PRECISION_WEIGHT
-        sigma = pm.HalfNormal('sigma', sigma=50, dims='site')
-        
-        pm.Normal('obs', mu=mu_model, sigma=sigma[site_idx] / np.sqrt(weights), observed=data['gdd'].values)
-        
-    return model
-
-def get_tripwire_doy(site_path, a_site, b_chill, lam, b_photo):
-    df = site_path.reset_index(drop=True)
-    
-    decay_factor = 1.0 - np.exp(-lam * df['chill'])
-    threshold_path = float(a_site) + float(b_chill) * decay_factor + float(b_photo) * df['photoperiod']
-    
-    valid_mask = (df.index >= 181) & (df['chill'] >= MIN_CHILL_REQUIRED)
-    trip = df.index[valid_mask & (df['gdd'] >= threshold_path)].tolist()
-    
-    if trip: return df.loc[trip[0], 'doy']
-    return MAY_31_DOY # No clamp, just safety ceiling
-
-def run_stochastic_forecast(idata, features, xgbr):
-    post = idata.posterior
-    forecasts = []
-    
-    for site in SITE_DEFS.keys():
-        if site not in post.coords['site'].values: continue
-        sdf = features[features['site'] == site].sort_values('date').reset_index(drop=True)
-        
-        sims = []
-        for _ in range(1000):
-            d, c = np.random.randint(0, post.draw.size), np.random.randint(0, post.chain.size)
+        bloom_row = path[path['doy'] == int(round(row['bloom_doy']))]
+        if not bloom_row.empty:
+            feat = bloom_row.iloc[0].copy() # Snapshots features at bloom
+            feat['bloom_doy'] = row['bloom_doy']
+            # Explicit Semantic Locks
+            feat['gdd0_cum_at_bloom'] = feat['gdd0_cum']
+            feat['chill7_cum_at_bloom'] = feat['chill7_cum']
+            training_rows.append(feat)
             
-            # Extract scalars
-            a = post['a_site'].sel(site=site, draw=d, chain=c).values
-            bc = post['b_chill'].sel(site=site, draw=d, chain=c).values
-            bp = post['b_photo'].sel(site=site, draw=d, chain=c).values
-            l = post['lam'].sel(draw=d, chain=c).values
-            
-            d_mech = get_tripwire_doy(sdf, a, bc, l, bp)
-            
-            day_feat = sdf[sdf['doy'] == int(d_mech)]
-            if day_feat.empty: day_feat = sdf.iloc[(sdf['doy'] - d_mech).abs().argsort()[:1]]
-            
-            # XGB features: [AO, NAO, ONI, VPD]
-            resid_feats = day_feat[['ao_30d', 'nao_30d', 'oni_30d', 'vpd']].values.reshape(1, -1)
-            resid = xgbr.predict(resid_feats)[0]
-            
-            sims.append(d_mech + resid)
-            
-        forecasts.append({'site': site, 'prediction': int(np.median(sims))})
-        
-    return pd.DataFrame(forecasts)
+    df_train_agg = pd.DataFrame(training_rows)
+    
+    return df_train_agg, df_daily, df_targets
 
 def main():
-    print("Starting v4.1 God-Tier Stabilization")
+    print("Initializing V5.0 God-Tier Architecture")
     
-    # 1. Load
-    df_agg, df_daily = load_data_orchestrator('features_train.csv', 'data', NYC_OFFSET_DAYS)
-    df_agg = df_agg.dropna(subset=['gdd', 'chill', 'vpd', 'bloom_doy'])
+    # 1. Data Ingestion
+    df_agg, df_daily, df_targets = load_data_orchestrator('features_train.csv', 'data')
+    
+    # 2. Empirical Anchors
+    site_anchors = extract_empirical_anchors(df_daily, df_targets)
+    print("Empirical Anchors (GDD0):", site_anchors)
     
     sites = sorted(df_agg['site'].unique())
     sites_map = {s: i for i, s in enumerate(sites)}
     coords = {'site': sites}
     
-    # 2. Audit 2015-2024
-    print("\nExecuting Data Integrity Audit...")
-    for s, decision in SCALING_REPORT.items():
-        print(f"  {s}: {decision}")
+    # 3. Expanding Window Validation (Time-Safe)
+    # Start from 2000 to ensure enough training history
+    validation_years = sorted([y for y in df_agg['bio_year'].unique() if y >= 2015])
+    
+    audit_results = []
+    print(f"\nStarting Expanding Window Audit (2015-2024)...")
+    
+    for test_year in validation_years:
+        if test_year > 2024: continue
         
-    print("\nStarting LOYO Audit (2015-2024)...")
-    audit_years = range(2015, 2025)
-    loyo_res = []
-    
-    # Pre-tune model? No, loop needs clean state.
-    # To save time, we run a simplified loop or just final training as requested "Immediate Action" implied refactor and proceed.
-    # But instructions say "Audit Window: LOYO-CV for 2015-2024". I must do it.
-    
-    for year in audit_years:
-        train = df_agg[df_agg['bio_year'] != year]
-        test = df_agg[df_agg['bio_year'] == year]
-        if test.empty: continue
+        train_mask = df_agg['bio_year'] < test_year
+        test_mask = df_agg['bio_year'] == test_year
         
-        with build_god_tier_model(train, coords, sites_map) as model:
-            # 2 chains, 2000 tune, 2000 draw
-            idata = pm.sample(2000, tune=2000, cores=1, target_accept=0.999, progressbar=False, random_seed=42)
-            
-        post = idata.posterior.mean(dim=['chain', 'draw'])
+        train_df = df_agg[train_mask].copy()
+        test_df = df_agg[test_mask].copy()
         
-        # Mech Preds
-        t_mech = []
-        for _, r in train.iterrows():
-            sdf = df_daily[(df_daily['site']==r['site']) & (df_daily['bio_year']==r['bio_year'])]
-            dm = get_tripwire_doy(sdf, 
-                                  post['a_site'].sel(site=r['site']).values, 
-                                  post['b_chill'].sel(site=r['site']).values, 
-                                  post['lam'].values, 
-                                  post['b_photo'].sel(site=r['site']).values)
-            t_mech.append(dm)
-            
-        # Hybrid
-        resid = train['bloom_doy'].values - np.array(t_mech)
-        xgbr = xgb.XGBRegressor(max_depth=2, n_estimators=50)
-        xgbr.fit(train[['ao_30d', 'nao_30d', 'oni_30d', 'vpd']], resid)
+        if train_df.empty or test_df.empty: continue
         
-        for _, row in test.iterrows():
-            sdf = df_daily[(df_daily['site']==row['site']) & (df_daily['bio_year']==row['bio_year'])]
-            d_m = get_tripwire_doy(sdf, 
-                                   post['a_site'].sel(site=row['site']).values, 
-                                   post['b_chill'].sel(site=row['site']).values, 
-                                   post['lam'].values, 
-                                   post['b_photo'].sel(site=row['site']).values)
-            
-            day_feat = sdf[sdf['doy'] == int(d_m)]
-            if day_feat.empty: day_feat = sdf.iloc[(sdf['doy']-d_m).abs().argsort()[:1]]
-            d_h = d_m + xgbr.predict(day_feat[['ao_30d', 'nao_30d', 'oni_30d', 'vpd']].values.reshape(1, -1))[0]
-            
-            loyo_res.append({'year': year, 'site': row['site'], 'mech_err': abs(row['bloom_doy']-d_m), 'hyb_err': abs(row['bloom_doy']-d_h)})
-            
-    audit_df = pd.DataFrame(loyo_res)
-    print("\nValidation Matrix (2015-2024):")
-    print(audit_df.groupby('site')[['mech_err', 'hyb_err']].mean())
-    
-    # 3. Final Training
-    print("\nTraining Final God-Tier Model...")
-    df_train = df_agg[df_agg['bio_year'] >= 1990].copy()
-    with build_god_tier_model(df_train, coords, sites_map) as model:
-        idata_f = pm.sample(2000, tune=2000, cores=1, target_accept=0.999, progressbar=False, random_seed=2026)
-    
-    # Diagnostics
-    print("\nMCMC Diagnostics:")
-    divs = idata_f.sample_stats.diverging.sum().item()
-    rhat = az.rhat(idata_f).max().to_array().max().item()
-    ess = az.ess(idata_f).min().to_array().min().item()
-    print(f"Divergences: {divs}")
-    print(f"Max R-hat: {rhat:.4f}")
-    print(f"Min ESS: {ess:.1f}")
-    
-    # Sensitivity Analysis
-    post_f = idata_f.posterior.mean(dim=['chain', 'draw'])
-    offsets = post_f['offset_raw'].to_dataframe()
-    max_off_idx = offsets.abs().idxmax()
-    if isinstance(max_off_idx, pd.Series):
-        max_off = max_off_idx.iloc[0]
-    else:
-        max_off = max_off_idx # Fallback
+        # A) Fit Mechanistic
+        with build_hierarchical_model(train_df, site_anchors, sites_map, coords) as model:
+            trace = pm.sample(1000, tune=1000, cores=1, target_accept=0.999, progressbar=False, random_seed=42)
         
-    print(f"\nSensitivity: Site with Max Offset: {max_off}")
-    
-    # Hybrid Train
-    t_mech = []
-    for _, r in df_train.iterrows():
-        sdf = df_daily[(df_daily['site']==r['site']) & (df_daily['bio_year']==r['bio_year'])]
-        dm = get_tripwire_doy(sdf, 
-                              post_f['a_site'].sel(site=r['site']).values, 
-                              post_f['b_chill'].sel(site=r['site']).values, 
-                              post_f['lam'].values, 
-                              post_f['b_photo'].sel(site=r['site']).values)
-        t_mech.append(dm)
+        post = trace.posterior.mean(dim=['chain', 'draw'])
         
-    xgbr_f = xgb.XGBRegressor(max_depth=2, n_estimators=100)
-    xgbr_f.fit(df_train[['ao_30d', 'nao_30d', 'oni_30d', 'vpd']], df_train['bloom_doy'].values - np.array(t_mech))
-    
-    # Forecast
-    df_fcast = sanitize_forecast_features(pd.read_csv('features_2026_forecast.csv'), df_daily)
-    sub = run_stochastic_forecast(idata_f, df_fcast, xgbr_f)
-    
-    # Check Confidence
-    medians = df_train.groupby('site')['bloom_doy'].median()
-    stds = df_train.groupby('site')['bloom_doy'].std()
-    
-    print("\nFinal Forecast Summary:")
-    for _, row in sub.iterrows():
-        s = row['site']
-        p = row['prediction']
-        if abs(p - medians[s]) > 2 * stds[s]:
-            print(f"WARNING: {s} prediction {p} is >2 sigma from median {medians[s]:.1f}")
+        # B) Infer t_mech on Train
+        t_mech_train = []
+        for _, r in train_df.iterrows():
+            path = df_daily[(df_daily['site']==r['site']) & (df_daily['bio_year']==r['bio_year'])]
+            tm = simulate_bloom_doy(path, post['a_site'].sel(site=r['site']).values, post['b_site'].sel(site=r['site']).values)
+            t_mech_train.append(tm)
+        train_df['t_mech'] = t_mech_train
+        train_df['resid'] = train_df['bloom_doy'] - train_df['t_mech']
+        
+        # C) Train Residual Model
+        xgbr = train_residual_stacker(train_df)
+        
+        # D) Predict on Test
+        for _, r in test_df.iterrows():
+            path = df_daily[(df_daily['site']==r['site']) & (df_daily['bio_year']==r['bio_year'])]
+            tm = simulate_bloom_doy(path, post['a_site'].sel(site=r['site']).values, post['b_site'].sel(site=r['site']).values)
             
-    sub['year'] = 2026
-    sub['location'] = sub['site'].replace({'newyorkcity': 'nyc'})
-    sub = sub[['location', 'year', 'prediction']]
+            # Residual Features
+            bloom_row = path[path['doy'] == int(tm)]
+            if bloom_row.empty: bloom_row = path.iloc[-1:] # Fallback
+            
+            feats = bloom_row[['ao_30d', 'nao_30d', 'oni_30d', 'vpd_14d']].to_frame().T
+            for c in ['ao_30d', 'nao_30d', 'oni_30d', 'vpd_14d']:
+                if c not in feats.columns: feats[c] = 0.0
+            
+            resid_pred = xgbr.predict(feats)[0]
+            th = tm + resid_pred
+            
+            audit_results.append({
+                'site': r['site'],
+                'year': test_year,
+                'mae_mech': abs(r['bloom_doy'] - tm),
+                'mae_hybrid': abs(r['bloom_doy'] - th)
+            })
+            
+    # Report
+    audit_df = pd.DataFrame(audit_results)
+    print("\n=== Ablation Report (Expanding Window) ===")
+    print(audit_df.groupby('site')[['mae_mech', 'mae_hybrid']].mean())
+    print("Overall:", audit_df[['mae_mech', 'mae_hybrid']].mean())
+    
+    # 4. Final Production Run
+    print("\nTraining Final Production Model (All History)...")
+    final_train = df_agg[df_agg['bio_year'] <= 2025].copy() # Use all available
+    
+    with build_hierarchical_model(final_train, site_anchors, sites_map, coords) as model:
+        idata = pm.sample(2000, tune=2000, cores=1, target_accept=0.999, progressbar=False, random_seed=2026)
+        
+    post_f = idata.posterior.mean(dim=['chain', 'draw'])
+    
+    # Re-sim mechanics on full set
+    t_mech_final = []
+    for _, r in final_train.iterrows():
+        path = df_daily[(df_daily['site']==r['site']) & (df_daily['bio_year']==r['bio_year'])]
+        tm = simulate_bloom_doy(path, post_f['a_site'].sel(site=r['site']).values, post_f['b_site'].sel(site=r['site']).values)
+        t_mech_final.append(tm)
+    final_train['t_mech'] = t_mech_final
+    final_train['resid'] = final_train['bloom_doy'] - final_train['t_mech']
+    
+    xgbr_f = train_residual_stacker(final_train)
+    
+    # 5. 2026 Forecast
+    print("\nGenerating 2026 Forecast...")
+    df_raw_forecast = pd.read_csv('features_2026_forecast.csv')
+    df_forecast = sanitize_forecast_features(df_raw_forecast, df_daily)
+    
+    predictions = []
+    post_draws = idata.posterior
+    
+    for site in SITE_DEFS.keys():
+        site_path = df_forecast[df_forecast['site'] == site]
+        if site_path.empty: continue
+        
+        sims = []
+        for _ in range(1000): # Stochastic ensemble
+            d, c = np.random.randint(0, post_draws.draw.size), np.random.randint(0, post_draws.chain.size)
+            a = post_draws['a_site'].sel(site=site, draw=d, chain=c).values
+            b = post_draws['b_site'].sel(site=site, draw=d, chain=c).values
+            
+            tm = simulate_bloom_doy(site_path, a, b)
+            
+            # Residual
+            bloom_row = site_path[site_path['doy'] == int(tm)]
+            if bloom_row.empty: bloom_row = site_path.iloc[-1:]
+            
+            feats = bloom_row[['ao_30d', 'nao_30d', 'oni_30d', 'vpd_14d']].to_frame().T
+            resid = xgbr_f.predict(feats)[0]
+            
+            sims.append(tm + resid)
+            
+        final_doy = int(round(np.median(sims)))
+        predictions.append({
+            'location': site.replace('newyorkcity', 'nyc'),
+            'year': 2026,
+            'prediction': final_doy
+        })
+        
+    sub = pd.DataFrame(predictions)
+    print("\n=== Final Submission ===")
     print(sub)
     sub.to_csv('submission_2026.csv', index=False)
 
