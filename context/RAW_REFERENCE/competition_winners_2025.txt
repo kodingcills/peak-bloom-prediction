@@ -1,0 +1,49 @@
+
+We challenged contestants to predict the day that the cherry trees will reach peak bloom.
+We asked contestants to submit their best predictions for select trees in Washington, D.C. and New York City (USA), Kyoto (Japan), Liestal-Weideli (Switzerland), and Vancouver, B.C. (Canada), along with a compelling narrative and reproducible analysis containing any data and code used. The competition is challenging because while it is known that cherry trees tend to bloom earlier each year as climates warm, complex weather patterns make annual predictions extremely difficult. 
+
+For the fourth year in a row, students, researchers, and citizen scientists from around the world accepted our challenge—this time with an added twist. In addition to competing against each other, contestants also competed against artificial intelligence as part of the “beat the bot” challenge. We are now thrilled to announce the results.
+
+Humans win!
+The average human entry was closer to the actual peak bloom date for every city except Kyoto. The humans were off by two days on average, while the AI was off by nearly four. Eight teams provided better predictions than the AI model and will receive commemorative memorabilia:
+
+Julijus Bogomolovas      
+Lukas Hans and Danielle Gagné 
+Michelle Harris 
+Frankie Hull 
+Garrett Martin 
+Grayson Saccomando 
+Matthias Spichiger 
+Manfred Tan 
+Three teams also won awards in the categories: most accurate prediction, best model (biology), and best model (statistics). The team members will share more than $5,000 in total prize money.
+
+Award for Most Accurate Prediction goes to Lukas Hans and Danielle Gagné
+Lukas Hans and Danielle Gagné submitted the most accurate forecast. Their predictions deviated from the actual peak bloom dates by one day on average. To create their predictions, Lukas and Danielle combined a large number of meteorological variables—including daily maximum, mean, and minimum temperatures, daylight duration, precipitation sum, rain sum, and snowfall sum—from October to March each year. Predictions were then made using an ensemble method that combined support vector regression, Bayesian Ridge regression, XGBoost, and LightGBM. Congratulations Lukas and Danielle!
+
+Award for Best Model (Biology) goes to Manfred Tan
+Manfred Tan used Fast Dynamic Time Warping (FastDTW) to compare a given temperature pattern with historical patterns in order to determine the most probable position of a cherry tree in the bloom cycle. Temperature patterns were identified using cumulative degree days, rolling temperature sums, and the sum of squares of temperature values. The judges were impressed by the ingenuity of the approach, which has been used successfully during the COVID-19 pandemic to forecast cases and deaths. Congratulations Manfred!
+
+Award for Best Model (Statistics) goes to Qinyu Xiong
+Qinyu Xiong used a stacked Long Short-Term Memory (LSTM) neural network to capture the temporal dependencies exhibited in the data. The data included daily temperature data during the winter and spring as well as aggregated data and extremes. The neural network was trained using a categorical cross-entropy loss function. The judges praised the approach as powerful and dynamic. Congratulations Qinyu!
+
+Honorable Mention goes to Jake Lane
+Jake Lane used Google Trends, which measures what people search for, to predict the peak bloom date. Google Trends have been used to predict a wide range of phenomenon, from flu outbreaks to GDP. Judges considered the approach novel and creative. Congratulations Jake!
+
+A big thanks to all competition participants
+We know every contestant worked hard to produce their most accurate and interpretable predictions. All their work will help scientists better understand the impacts of climate change, and we hope their contribution does not end here. We encourage each contestant to continue to work on their models and narratives and reenter the Cherry Blossom Prediction Competition again next year.
+
+The calendars below show the days the contestants predicted the peak bloom date will occur. Some believed peak bloom would occur in early March, while others believed it would occur in early May. When the entries were combined, the overall consensus was that the cherry trees would reach peak bloom between late March and early April. The average predicted peak bloom dates were March 29th for Liestal-Weideli, March 30th for Washington D.C., March 31st for Vancouver, BC, and April 3rd for Kyoto and New York City—denoted on the calendars by 🌸. For the first time ever, we asked ChatGPT o3-mini-high to produce a model with the aid of our AI handler, Yu-lin Hsu. The AI predictions are denoted on the calendars by 🤖.
+
+
+
+
+
+
+The contestants largely agreed that the cherry trees will bloom between late March and early April. (The dark blue squares denote bloom days with high probability according to the entries, while the light blue squares denote bloom days with low probability. The probability was determined by approximating the histogram of days predicted by the contestants with a normal distribution.) For comparison, our AI handler also asked ChatGPT o3-mini-high to provide a model. 🌸 denotes the average prediction of the contestants, and 🤖 denotes the prediction provided by ChatGPT.
+Overall, the contestants agreed with the National Park Service prediction. 
+The National Park Service predicted the peak bloom of the Washington D.C. cherry trees would occur between March 28th and March 31st. A comparable region given by the contestants was also March 28th to March 31st. The contestants disagreed with the Washington Post, which predicted an earlier date, between March 23th and March 27th—although this range was consistent with the predictions provided by ChatGPT. 
+
+The contestants disagreed with the Japan Meteorological Corporation’s 6th forecast on average, which predicted that the peak bloom of the Kyoto cherry trees would occur on April 6th. (Note JMC provided predictions for Prunus × yedoensis while the contestants predicted Prunus jamasakura. These species have similar but not identical bloom dates.) 
+
+For New York City and Vancouver, BC, where there is almost no historical data, contestants thought that full bloom would be April 3rd and March 31st, respectively. The Vancouver Cherry Blossom Festival posted updates on the stage of their cherry trees on the UBC Botanical Garden Forums.
+

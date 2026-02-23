@@ -1,0 +1,38 @@
+Climate change stresses environments in urgent and unpredictable ways, from increasing the frequency of natural disasters to threatening the availability of food and drinkable water. Even in Mason’s local community, the DMV area, climate change alters the timing of major life-cycle events—perhaps most notably the day cherry trees bloom in D.C. These trees are a visible marker of the broad and largely invisible impact of climate change.
+
+Over the previous decade, cherry trees have bloomed earlier than any decade on record. But variation in climate conditions makes annual predictions extremely difficult. According to the National Parks Service,
+
+Forecasting peak bloom is almost impossible more than 10 days in advance. The cherry trees’ blossom development is dependent on weather conditions. National Park Service horticulturists monitor bud development and report the status of the blossoms.
+
+National Parks Service (https://www.nps.gov/subjects/cherryblossom/bloom-watch.htm)
+That’s where you come in!
+For this competition, we seek accurate, interpretable predictions that offer strong narratives about the factors that determine when cherry trees bloom and the broader consequences for local and global ecosystems. We will provide you with all the publicly available data on the bloom date of cherry trees we can find, including Washington, D.C. (USA), Kyoto (Japan), and Liestal-Weideli (Switzerland). You will then use this data in combination with any other publicly available data (e.g., climate data) to provide reproducible predictions of the peak bloom date of trees at the following five sites:
+
+Location	Latitude (°)	Longitude (°)	Altitude (m)	Years available	Bloom definition	Species
+Kyoto (Japan)	35.0120	135.6761	44	801–2023	80%	Prunus jamasakura
+Liestal-Weideli (Switzerland)	47.4814	7.730519	350	1895–2023	25%	Prunus avium
+Washington, D.C. (USA)	38.8853	–77.0386	0	1921–2023	70%	Prunus × yedoensis ‘Somei-yoshino’
+Vancouver, BC (Canada)	49.2237	–123.1636	24	2022–20231	70%	Prunus × yedoensis ‘Akebono’
+New York City, NY (USA)	40.73040	–73.99809	8.5	2019–20232	70%	Prunus × yedoensis
+1 The Vancouver Cherry Blossom Festival has updated information on the bloom status. Moreover, casual observations have been recorded in the way of photos posted to the VCBF Neighbourhood Blog for Kerrisdale. You can search the forum for the keywords ‘Akebono’ (i.e., the name of the cultivar) and “Maple Grove Park” (i.e., the location of the trees).
+
+2 This data can be found in the data files provided by USA-NPN. The site ID for Washington Square Park is 32789 and the species ID is 228.
+
+Your task is to predict the peak bloom date for 2026 and beat AI-generated models for forcasting peak bloom. The organizers must be able to reproduce your predictions to be eligible for an award. Complete entries will then be evaluated in multiple categories:
+
+most accurate prediction for 2026 (averaged across all five sites),
+best/most novel idea (judged based on the submitted abstract).
+The first category will be based on mean absolute error according to the peak bloom date declared by the National Park Service (Washington, D.C.), Japan Meteorological Agency (Kyoto), MeteoSwiss (Liestal-Weideli), the Vancouver Cherry Blossom Festival in collaboration with the UBC Botanical Garden (Vancouver, BC), and the Washington Square Park Eco projects in collaboration with the Local Nature Lab (New York City, NY). For the second category your predictions must be more accurate than the predictions from the AI-generated models at each of the five locations. The prize for the best/most novel idea will be based on a review of the submitted abstracts by our expert judges.
+
+For an entry to be complete, it must be submitted before February 28th, 2026 midnight AOE (anywhere on earth). It must contain all five predictions and the data and code to reproduce the results as Quarto document. It must also contain an abstract of less than 500 words. Examples that can’t be reproduced or without sufficiently complete or coherent abstracts will be rejected at the discretion of the organizers.
+
+Complete entries will be eligible to win cash prizes and commemorative memorabilia. Select entries will be hosted on this competition website and promoted by the George Mason Department of Statistics, our partners, and sponsors. Any participant can be part of only one team.
+
+How to enter the competition
+A complete entry to the competition must contain three parts:
+
+Predictions for the five sites for 2026.
+A blinded abstract of at most 500 words, outlining the idea behind the selected variable(s)/feature(s) and model(s).
+A link to a publicly accessible Git repository with all code and data required to reproduce the analysis.
+George Mason University logo
+

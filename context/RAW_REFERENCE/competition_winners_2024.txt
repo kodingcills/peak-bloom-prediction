@@ -1,0 +1,49 @@
+We challenged contestants to predict the day that the cherry trees will reach peak bloom.
+We asked contestants to submit their best predictions for select trees in Washington, D.C. (USA), Kyoto (Japan), Liestal-Weideli (Switzerland), Vancouver, BC (Canada), and New York City (USA), along with a compelling narrative and reproducible analysis containing any data and code used. The competition is challenging because while it is known that cherry trees tend to bloom earlier each year as the earth’s climate warms, complex weather patterns make annual predictions extremely difficult. 
+
+For the third year in a row, students, researchers, and citizen scientists from around the world accepted our challenge. Each entry was evaluated by its predictive performance and interpretability—with the help of an independent panel of judges. We are now thrilled to announce the winners.
+
+The results are in!
+This year, four teams won awards in three categories: most accurate prediction, most accurate prediction intervals, and best model. The team members will share more than $5,000 in total prize money.
+
+Award for Most Accurate Prediction goes to Jose Rodriguez
+
+Jose Rodriguez submitted the most accurate forecast. His predictions deviated from the actual peak bloom dates by approximately three days on average. To create his predictions, Jose combined a large number of meteorological variables using gradient boosted decision trees. (Note that the closest prediction last year also used gradient boosted decision trees.) Congratulations Jose! 
+
+Award for Most Accurate Prediction Intervals goes to Yu Chen Lim-Hitchings
+
+Yu Chen Lim-Hitchings submitted the most accurate prediction intervals. His intervals covered the actual peak bloom date observed at all five locations, and the center of each interval deviated by from the actual date by approximately one week on average. To create his intervals, Yu Chen used Bayesian linear regression with informative priors, chosen after visualizing the data. Congratulations Yu Chen! 
+
+Award for Best Model (biology) goes to Luna Frauhammer
+
+Luna Frauhammer estimated the dormancy release date, the time in late Winter or early Spring when the temperature trend reverses from going down to getting warmer again. She found that this date was a strong predictor of the peak bloom date. The judges appreciated the simplicity and interpretability of her approach, as well as the clarity of the presentation and figures. For locations with few past observations (Vancouver and New York), Luna used records collected by USA National Phenology Network. Congratulations Luna! 
+
+Award for Best Model (statistics) goes to Edimer David Jaramillo
+
+Edimer David Jaramillo performed an extensive exploratory data analysis to better understand the relationships between the large number of high-resolution datasets, including data collected by USA National Phenology Network. This analysis led to the creation of several novel predictors. The judges appreciated the effort that went into identifying a large number of datasets and choosing appropriate predictors. Congratulations Edimer!
+
+An honorable mention goes to Julian Christov
+Julian Christov collected data on hotel prices at each city and predicted peak bloom would occur during the days with the highest prices. He reasoned that tourists are more likely to visit a city during peak bloom and that the higher demand for hotels would be reflected in higher prices. The judges appreciated the creativity of the solution. Congratulations Julian!
+
+A big thanks to all competition participants 
+We know every contestant worked hard to produce their most accurate and interpretable predictions. All their work will help scientists better understand the impacts of climate change, and we hope their contribution does not end here. We encourage each contestant to continue to work on their models and narratives and reenter the Cherry Blossom Prediction Competition again next year.
+
+We provide a summary of the 2024 entries for future reference. 
+
+Contestants vary widely in their predictions for 2024.
+The calendars below show the days the contestants predict the peak bloom date will occur. Some believe peak bloom will occur in mid-March, while others believe it will occur in mid-April. When the entries are combined, the overall consensus is that the cherry trees will bloom between late March and early April. The average predicted peak bloom dates are March 26th for Washington D.C., March 27th for Liestal-Weideli, April 2nd for Kyoto and New York City, and April 3rd for Vancouver, BC—denoted on the calendars by 🌸.
+
+
+
+
+
+
+The contestants largely agree that the cherry trees will bloom between late March and early April. (The dark blue squares denote bloom days with high probability according to the entries, while the light blue squares denote bloom days with low probability. The probability was determined by approximating the histogram of days predicted by the contestants with a normal distribution.) The contestants agree the most about the bloom date of the Washington D.C. and Vancouver, BC locations and the least about the bloom date of the New York City location.
+
+Overall, the contestants agree with the National Park Service prediction.
+The National Park Service predicts the peak bloom of the Washington D.C. cherry trees will occur between March 23rd and March 26th, while our contestants predict between March 24th and March 27th on average. The contestants disagree with the Washington Post, which predicts between March 19th and March 23rd.
+
+On average, the contestants somewhat disagree with the Japan Meteorological Corporation’s 6th forecast, which predicts that the peak bloom of the Kyoto cherry trees will occur on March 31st. (Note JMC provided predictions for Prunus × yedoensis while the contestants predicted Prunus jamasakura. These species have similar but not identical bloom dates.)
+
+For New York City and Vancouver, BC, where there is almost no historical data, the average prediction is April 2nd and April 3rd, respectively. The Vancouver Cherry Blossom Festival posts updates on the progress of their cherry trees on the UBC Botanical Garden Forums.
+

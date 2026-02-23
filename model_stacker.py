@@ -136,9 +136,19 @@ def extract_empirical_anchors(df_daily, df_targets):
             path = df_daily[(df_daily['site'] == site) & (df_daily['bio_year'] == row['bio_year'])]
             if path.empty: continue
             
-            # Extract exactly at bloom DOY
+            # Extract exactly at bloom DOY with ±3 day fallback
             target_doy = int(round(row['bloom_doy']))
             bloom_row = path[path['doy'] == target_doy]
+            
+            if bloom_row.empty:
+                # Bounded nearest-day fallback (±3 days)
+                offsets = [1, -1, 2, -2, 3, -3]
+                for off in offsets:
+                    fallback_row = path[path['doy'] == target_doy + off]
+                    if not fallback_row.empty:
+                        bloom_row = fallback_row
+                        break
+            
             if not bloom_row.empty:
                 gdd_at_bloom.append(bloom_row['gdd0_cum'].values[0])
         
@@ -204,14 +214,15 @@ def build_hierarchical_model(train_data, site_anchors, sites_map, coords):
     return model
 
 # --- Task 6: Mechanistic Simulation ---
-def simulate_bloom_doy(daily_path, a_hat, b_hat):
+def simulate_bloom_doy(daily_path, a_hat, b_hat, mu_c, sd_c):
     """
-    Simulates bloom DOY by scanning cumulative GDD until it crosses the 
-    dynamic F* threshold. Returns 151 (May 31) if unreachable.
+    Simulates bloom DOY in standardized space.
+    threshold(t) = a_hat + b_hat * [(Chill(t) - mu_c) / sd_c]
     """
     path = daily_path.reset_index(drop=True)
-    # Threshold(t) = a + b * Chill(t)
-    threshold = a_hat + b_hat * path['chill7_cum']
+    # Standardize path chill using site-specific stats from training
+    chill_stdized = (path['chill7_cum'] - mu_c) / sd_c
+    threshold = a_hat + b_hat * chill_stdized
     
     # Tripwire crossing
     # Must occur after March 1st (DOY 60) for biological plausibility
@@ -258,7 +269,7 @@ def train_residual_stacker(df_train):
     for f in features:
         if f not in df_firewalled.columns: df_firewalled[f] = 0.0
             
-    xgbr = xgb.XGBRegressor(max_depth=2, n_estimators=100, learning_rate=0.05, reg_lambda=10)
+    xgbr = xgb.XGBRegressor(max_depth=2, n_estimators=100, learning_rate=0.05, reg_lambda=10, random_state=42)
     xgbr.fit(df_firewalled[features], df_firewalled['resid'])
     
     return xgbr
@@ -267,10 +278,11 @@ def train_residual_stacker(df_train):
 def sanitize_forecast_features(df_forecast, df_train_daily):
     """
     Enforces the canonical Feb 28th cutoff and fills temporal gaps.
+    Fills teleconnections via climatology post-cutoff.
     """
     # Normals from scaled training paths
     df_train_daily['month_day'] = df_train_daily['date'].dt.strftime('%m-%d')
-    normals = df_train_daily.groupby(['site', 'month_day'])[['TAVG', 'TMAX', 'TMIN']].mean().reset_index()
+    normals = df_train_daily.groupby(['site', 'month_day'])[['TAVG', 'TMAX', 'TMIN', 'ao_30d', 'nao_30d', 'oni_30d']].mean().reset_index()
     
     processed = []
     for site in df_forecast['site'].unique():
@@ -290,7 +302,6 @@ def sanitize_forecast_features(df_forecast, df_train_daily):
             gap_dates = pd.date_range(start=last_obs_date + pd.Timedelta(days=1), end=FORECAST_CUTOFF_DATE)
             gap_df = pd.DataFrame({'date': gap_dates, 'site': site, 'is_observed': False})
             gap_df['month_day'] = gap_df['date'].dt.strftime('%m-%d')
-            # Fix: Merge on ['site', 'month_day'] to prevent site column duplication/NaNs
             gap_df = gap_df.merge(normals, on=['site', 'month_day'], how='left')
             
             # 7-day Linear Decay Bridge from last observed values
@@ -307,18 +318,18 @@ def sanitize_forecast_features(df_forecast, df_train_daily):
         pad_dates = pd.date_range(start=FORECAST_CUTOFF_DATE + pd.Timedelta(days=1), end='2026-05-31')
         pad_df = pd.DataFrame({'date': pad_dates, 'site': site, 'is_observed': False})
         pad_df['month_day'] = pad_df['date'].dt.strftime('%m-%d')
-        # Fix: Merge on ['site', 'month_day']
         pad_df = pad_df.merge(normals, on=['site', 'month_day'], how='left')
         
         full_path = pd.concat([sdf, pad_df], ignore_index=True)
-        # Fix: Assert site labels are retained
         assert not full_path['site'].isna().any(), f"Vanishing site labels detected for {site}"
         
         full_path['doy'] = full_path['date'].dt.dayofyear
         
-        # Teleconnections carry-forward
+        # Teleconnections: Climatological Fill Post-Cutoff
         for c in ['ao_30d', 'nao_30d', 'oni_30d']:
-            full_path[c] = full_path[c].ffill(limit=30).fillna(0.0)
+             # Fill any NaNs remaining after merge with climatology (handled by merge with normals)
+             # Then ffill to ensure no small gaps survived
+             full_path[c] = full_path[c].ffill().fillna(0.0)
             
         # Bio-Thermal Compute (V5 Engine)
         full_path = compute_bio_thermal_path(full_path)
@@ -370,7 +381,18 @@ def load_data_orchestrator(features_path, targets_dir):
         path = df_daily[(df_daily['bio_year'] == row['bio_year']) & (df_daily['site'] == row['site'])]
         if path.empty: continue
         
-        bloom_row = path[path['doy'] == int(round(row['bloom_doy']))]
+        target_doy = int(round(row['bloom_doy']))
+        bloom_row = path[path['doy'] == target_doy]
+        
+        if bloom_row.empty:
+            # Bounded nearest-day fallback (±3 days)
+            offsets = [1, -1, 2, -2, 3, -3]
+            for off in offsets:
+                fallback_row = path[path['doy'] == target_doy + off]
+                if not fallback_row.empty:
+                    bloom_row = fallback_row
+                    break
+                    
         if not bloom_row.empty:
             feat = bloom_row.iloc[0].copy() # Snapshots features at bloom
             feat['bloom_doy'] = row['bloom_doy']
@@ -398,7 +420,6 @@ def main():
     coords = {'site': sites}
     
     # 3. Expanding Window Validation (Time-Safe)
-    # Start from 2000 to ensure enough training history
     validation_years = sorted([y for y in df_agg['bio_year'].unique() if y >= 2015])
     
     audit_results = []
@@ -420,24 +441,20 @@ def main():
             trace = pm.sample(1000, tune=1000, cores=1, target_accept=0.999, progressbar=False, random_seed=42)
         
         post = trace.posterior.mean(dim=['chain', 'draw'])
-        # Calculate unstandardized parameters for mechanistic simulation
         chill_stats = train_df.groupby('site')['chill7_cum_at_bloom'].agg(['mean', 'std']).to_dict('index')
         
-        # B) Infer t_mech on Train
+        # B) Infer t_mech on Train (Standardized Space)
         t_mech_train = []
         for _, r in train_df.iterrows():
             site = r['site']
             mu_c = chill_stats[site]['mean']
             sd_c = chill_stats[site]['std'] if chill_stats[site]['std'] > 0 else 1.0
             
-            b_std = post['b_site'].sel(site=site).values
-            a_std = post['a_site'].sel(site=site).values
-            
-            b_unstd = b_std / sd_c
-            a_unstd = a_std - b_std * (mu_c / sd_c)
+            b_hat = post['b_site'].sel(site=site).values
+            a_hat = post['a_site'].sel(site=site).values
             
             path = df_daily[(df_daily['site']==site) & (df_daily['bio_year']==r['bio_year'])]
-            tm = simulate_bloom_doy(path, a_unstd, b_unstd)
+            tm = simulate_bloom_doy(path, a_hat, b_hat, mu_c, sd_c)
             t_mech_train.append(tm)
         train_df['t_mech'] = t_mech_train
         train_df['resid'] = train_df['bloom_doy'] - train_df['t_mech']
@@ -451,20 +468,17 @@ def main():
             mu_c = chill_stats[site]['mean']
             sd_c = chill_stats[site]['std'] if chill_stats[site]['std'] > 0 else 1.0
             
-            b_std = post['b_site'].sel(site=site).values
-            a_std = post['a_site'].sel(site=site).values
-            
-            b_unstd = b_std / sd_c
-            a_unstd = a_std - b_std * (mu_c / sd_c)
+            b_hat = post['b_site'].sel(site=site).values
+            a_hat = post['a_site'].sel(site=site).values
             
             path = df_daily[(df_daily['site']==site) & (df_daily['bio_year']==r['bio_year'])]
-            tm = simulate_bloom_doy(path, a_unstd, b_unstd)
+            tm = simulate_bloom_doy(path, a_hat, b_hat, mu_c, sd_c)
             
             # Residual Features
             bloom_row = path[path['doy'] == int(tm)]
-            if bloom_row.empty: bloom_row = path.iloc[-1:] # Fallback
+            if bloom_row.empty: bloom_row = path.iloc[-1:] 
             
-            feats = bloom_row[['ao_30d', 'nao_30d', 'oni_30d', 'vpd_14d']].to_frame().T
+            feats = bloom_row[['ao_30d', 'nao_30d', 'oni_30d', 'vpd_14d']]
             for c in ['ao_30d', 'nao_30d', 'oni_30d', 'vpd_14d']:
                 if c not in feats.columns: feats[c] = 0.0
             
@@ -486,7 +500,7 @@ def main():
     
     # 4. Final Production Run
     print("\nTraining Final Production Model (All History)...")
-    final_train = df_agg[df_agg['bio_year'] <= 2025].copy() # Use all available
+    final_train = df_agg[df_agg['bio_year'] <= 2025].copy() 
     
     with build_hierarchical_model(final_train, site_anchors, sites_map, coords) as model:
         idata = pm.sample(2000, tune=2000, cores=1, target_accept=0.999, progressbar=False, random_seed=2026)
@@ -494,21 +508,18 @@ def main():
     post_f = idata.posterior.mean(dim=['chain', 'draw'])
     chill_stats_final = final_train.groupby('site')['chill7_cum_at_bloom'].agg(['mean', 'std']).to_dict('index')
     
-    # Re-sim mechanics on full set
+    # Re-sim mechanics on full set (Standardized Space)
     t_mech_final = []
     for _, r in final_train.iterrows():
         site = r['site']
         mu_c = chill_stats_final[site]['mean']
         sd_c = chill_stats_final[site]['std'] if chill_stats_final[site]['std'] > 0 else 1.0
         
-        b_std = post_f['b_site'].sel(site=site).values
-        a_std = post_f['a_site'].sel(site=site).values
-        
-        b_unstd = b_std / sd_c
-        a_unstd = a_std - b_std * (mu_c / sd_c)
+        b_hat = post_f['b_site'].sel(site=site).values
+        a_hat = post_f['a_site'].sel(site=site).values
         
         path = df_daily[(df_daily['site']==site) & (df_daily['bio_year']==r['bio_year'])]
-        tm = simulate_bloom_doy(path, a_unstd, b_unstd)
+        tm = simulate_bloom_doy(path, a_hat, b_hat, mu_c, sd_c)
         t_mech_final.append(tm)
     final_train['t_mech'] = t_mech_final
     final_train['resid'] = final_train['bloom_doy'] - final_train['t_mech']
@@ -534,19 +545,16 @@ def main():
         for _ in range(1000): # Stochastic ensemble
             d, c = np.random.randint(0, post_draws.draw.size), np.random.randint(0, post_draws.chain.size)
             
-            b_std = post_draws['b_site'].sel(site=site, draw=d, chain=c).values
-            a_std = post_draws['a_site'].sel(site=site, draw=d, chain=c).values
+            b_hat = post_draws['b_site'].sel(site=site, draw=d, chain=c).values
+            a_hat = post_draws['a_site'].sel(site=site, draw=d, chain=c).values
             
-            b_unstd = b_std / sd_c
-            a_unstd = a_std - b_std * (mu_c / sd_c)
-            
-            tm = simulate_bloom_doy(site_path, a_unstd, b_unstd)
+            tm = simulate_bloom_doy(site_path, a_hat, b_hat, mu_c, sd_c)
             
             # Residual
             bloom_row = site_path[site_path['doy'] == int(tm)]
             if bloom_row.empty: bloom_row = site_path.iloc[-1:]
             
-            feats = bloom_row[['ao_30d', 'nao_30d', 'oni_30d', 'vpd_14d']].to_frame().T
+            feats = bloom_row[['ao_30d', 'nao_30d', 'oni_30d', 'vpd_14d']]
             resid = xgbr_f.predict(feats)[0]
             
             sims.append(tm + resid)

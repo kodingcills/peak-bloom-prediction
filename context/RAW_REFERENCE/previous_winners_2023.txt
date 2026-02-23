@@ -1,0 +1,41 @@
+
+We challenged contestants to predict the day that the cherry trees will reach peak bloom.
+We asked contestants to submit their best predictions for select trees in Washington, D.C. (USA), Kyoto (Japan), Liestal-Weideli (Switzerland), and Vancouver, BC (Canada), along with a compelling narrative and reproducible analysis containing any data and code used. The competition is challenging because while it is known that cherry trees tend to bloom earlier each year as climates warm, complex weather patterns make annual predictions extremely difficult. 
+
+For the second year in a row, students, researchers, and citizen scientists from around the world accepted our challenge. Each entry was evaluated by its predictive performance and interpretability—with the help of an independent panel of judges. We are now thrilled to announce the winners. 
+
+The results are in!
+This year, four teams won awards in three categories: most accurate prediction, best narrative, and best model. The team members will share more than $5,000 in total prize money.
+
+Award for Most Accurate Prediction goes to Olga Vishnyakova, Renny Doig, and Wendy Wang
+Olga, Renny, and Wendy submitted the most accurate forecast. Their predictions deviated from the actual peak bloom dates by approximately three days on average. To create their predictions, the team combined the predictions of seven different machine learning algorithms. They found that among these algorithms, gradient boosted decision trees provided the best predictions. Congratulations Olga, Renny, and Wendy! 
+
+Award for Best Narrative (Statistics) goes to Aniruddha Pathak, Kunal Das, and Subrata Pal 
+Aniruddha, Kunal, and Subrata used a binomial regression model with carefully considered covariates and correlation structure. The judges appreciated the simplicity and interpretability of their approach, with one judge admiring their “unique and carefully reasoned model structure.” Another judge added that the entry did a good job of “pulling in relevant science/data and show[ing] good intuition on both statistics and biology.” Congratulations Aniruddha, Kunal, and Subrata! 
+
+Award for Best Model (USA NPN Data) goes to Johnson Wei, Hanji Sun, Max Xu, Erin Ma, and Yi Pan
+Johnson, Hanji, Max, Erin, and Yi improved traditional methods for bloom date prediction, such as USA NPN accumulated growing degree days, using eXtreme Gradient Boosting and a convolutional neural network. Like Olga, Renny, and Wendy, they found that gradient boosting produced the best predictions. The judges were impressed by the combination of traditional methods with machine learning. Several judges also appreciated that the authors explained how the algorithms worked. (Note that the competition judges come from a wide variety of backgrounds.) Congratulations Johnson, Hanji, Max, Erin, and Yi! 
+
+Award for Best Model (Most Original) goes to Gabriel Brehm and Alayna Schoenberger 
+Gabriel and Alayna noticed that many contestant entries are listed on GitHub (because they forked the competition GitHub repository). They decided to make their predictions by selecting several of these entries and reweighting them. (The strategy worked—only two teams had more accurate predictions, with Olga, Renny, and Wendy’s entry beating Gabriel and Alayna’s by only half a day.)  The judges enjoyed the “wisdom of the crowds” motivation, and the cleverness of combining previous entries. Congratulations Gabriel and Alayna! 
+
+A big thanks to all competition participants 
+We know every contestant worked hard to produce their most accurate and interpretable predictions. All their work will help scientists better understand the impacts of climate change, and we hope their contribution does not end here. We encourage each contestant to continue to work on their models and narratives and reenter the Cherry Blossom Prediction Competition again next year. 
+
+We provide a summary of the 2023 entries for future reference. 
+
+Contestants vary widely in their predictions for 2023.
+The calendars below show the days the contestants predict the peak bloom date will occur. Some believe peak bloom will occur in early March, while others believe it will occur in early May. When the entries are combined, the overall consensus is that the cherry trees will bloom between late March and early April. The average predicted peak bloom dates are April 4th for Kyoto, April 5th for Liestal-Weideli and Vancouver, and March 28th for Washington D.C.—denoted on the calendars by 🌸.
+
+
+
+
+
+The contestants largely agree that the cherry trees will bloom between late March and early April. (The dark blue squares denote bloom days with high probability according to the entries, while the light blue squares denote bloom days with low probability. The probability was determined by approximating the histogram of days predicted by the contestants with a normal distribution.) The contestants agree the most about the bloom date of the Washington D.C. location and the least about the bloom date of the Liestal-Weideli location.
+
+Overall, the contestants agree with the National Park Service prediction.
+The National Park Service predicts the peak bloom of the Washington D.C. cherry trees will occur between March 23rd and March 26th, while our contestants predict between March 24th and March 27th on average. The contestants disagree with the Washington Post, which predicts between March 19th and March 23rd.
+
+On average, the contestants somewhat disagree with the Japan Meteorological Corporation’s 6th forecast, which predicts that the peak bloom of the Kyoto cherry trees will occur on March 31st. (Note JMC provided predictions for Prunus × yedoensis while the contestants predicted Prunus jamasakura. These species have similar but not identical bloom dates.)
+
+For New York City and Vancouver, BC, where there is almost no historical data, the average prediction is April 2nd and April 3rd, respectively. The Vancouver Cherry Blossom Festival posts updates on the progress of their cherry trees on the UBC Botanical Garden Forums.
