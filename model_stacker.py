@@ -6,7 +6,9 @@ import arviz as az
 import xgboost as xgb
 import os
 import warnings
+import logging
 from sklearn.metrics import mean_absolute_error
+from seasonal_anomaly_engine import AnomalyEngine
 
 # --- Policy & Global Constants (V5.0) ---
 # Aligned with context/SYSTEM_CONTEXT_INDEX.md
@@ -14,6 +16,12 @@ FORECAST_CUTOFF_DATE = pd.to_datetime("2026-02-28")
 MAY_31_DOY = 151
 MODEL_T_BASE_HEAT = 0.0      # GDD0
 MODEL_T_BASE_CHILL = 7.0     # Reference base for chill units
+
+# Patch P0-B Config
+ALLOW_CLIMATOLOGY_FALLBACK = False
+ENSEMBLE_SIZE = 100
+RANDOM_SEED = 2026
+np.random.seed(RANDOM_SEED)
 
 # Simplified SITE_DEFS (Task 1)
 SITE_DEFS = {
@@ -275,10 +283,11 @@ def train_residual_stacker(df_train):
     return xgbr
 
 # --- Task 8: Forecast Sanitization ---
-def sanitize_forecast_features(df_forecast, df_train_daily):
+def sanitize_forecast_features(df_forecast, df_train_daily, anomaly_engine=None):
     """
     Enforces the canonical Feb 28th cutoff and fills temporal gaps.
     Fills teleconnections via climatology post-cutoff.
+    Integrates Patch P0-B: Seasonal Anomaly Perturbations.
     """
     # Normals from scaled training paths
     df_train_daily['month_day'] = df_train_daily['date'].dt.strftime('%m-%d')
@@ -320,6 +329,21 @@ def sanitize_forecast_features(df_forecast, df_train_daily):
         pad_df['month_day'] = pad_df['date'].dt.strftime('%m-%d')
         pad_df = pad_df.merge(normals, on=['site', 'month_day'], how='left')
         
+        # 3B. Seasonal Anomaly Perturbation (Patch P0-B)
+        if anomaly_engine:
+            for i, row in pad_df.iterrows():
+                m = row['date'].month
+                y = row['date'].year
+                for var in ['TAVG', 'TMAX', 'TMIN']:
+                    anom = anomaly_engine.get_monthly_anomaly(site, y, m, var)
+                    pad_df.loc[i, var] += anom
+                
+                # Enforce physical constraints: TMIN <= TAVG <= TMAX
+                pad_df.loc[i, 'TMAX'] = max(pad_df.loc[i, 'TMAX'], pad_df.loc[i, 'TAVG'], pad_df.loc[i, 'TMIN'])
+                pad_df.loc[i, 'TMIN'] = min(pad_df.loc[i, 'TMIN'], pad_df.loc[i, 'TAVG'], pad_df.loc[i, 'TMAX'])
+                # Re-center TAVG if it was pushed out of bounds
+                pad_df.loc[i, 'TAVG'] = np.clip(pad_df.loc[i, 'TAVG'], pad_df.loc[i, 'TMIN'], pad_df.loc[i, 'TMAX'])
+
         full_path = pd.concat([sdf, pad_df], ignore_index=True)
         assert not full_path['site'].isna().any(), f"Vanishing site labels detected for {site}"
         
@@ -327,8 +351,6 @@ def sanitize_forecast_features(df_forecast, df_train_daily):
         
         # Teleconnections: Climatological Fill Post-Cutoff
         for c in ['ao_30d', 'nao_30d', 'oni_30d']:
-             # Fill any NaNs remaining after merge with climatology (handled by merge with normals)
-             # Then ffill to ensure no small gaps survived
              full_path[c] = full_path[c].ffill().fillna(0.0)
             
         # Bio-Thermal Compute (V5 Engine)
@@ -337,6 +359,26 @@ def sanitize_forecast_features(df_forecast, df_train_daily):
         processed.append(full_path)
         
     return pd.concat(processed)
+        
+    return pd.concat(processed)
+
+def prepare_noise_pool(df_daily):
+    """
+    Computes daily residuals (observed - climatology) from historical data
+    to be used for stochastic perturbation of the forecast.
+    """
+    df = df_daily.copy()
+    df['month_day'] = df['date'].dt.strftime('%m-%d')
+    
+    cols = ['TAVG', 'TMAX', 'TMIN']
+    # Calculate historical normals per site/month_day
+    normals = df.groupby(['site', 'month_day'])[cols].mean().reset_index()
+    df = df.merge(normals, on=['site', 'month_day'], suffixes=('', '_normal'))
+    
+    for col in cols:
+        df[f'{col}_resid'] = df[col] - df[f'{col}_normal']
+        
+    return df[['site', 'month_day', 'TAVG_resid', 'TMAX_resid', 'TMIN_resid']]
 
 # --- Orchestrator ---
 
@@ -436,8 +478,14 @@ def main():
         
         if train_df.empty or test_df.empty: continue
         
+        # 2.1 Fix: Time-safe anchors for audit loop
+        site_anchors_fold = extract_empirical_anchors(
+            df_daily[df_daily['bio_year'] < test_year], 
+            df_targets[df_targets['bio_year'] < test_year]
+        )
+        
         # A) Fit Mechanistic
-        with build_hierarchical_model(train_df, site_anchors, sites_map, coords) as model:
+        with build_hierarchical_model(train_df, site_anchors_fold, sites_map, coords) as model:
             trace = pm.sample(1000, tune=1000, cores=1, target_accept=0.999, progressbar=False, random_seed=42)
         
         post = trace.posterior.mean(dim=['chain', 'draw'])
@@ -447,6 +495,7 @@ def main():
         t_mech_train = []
         for _, r in train_df.iterrows():
             site = r['site']
+            # Site is guaranteed to be in chill_stats because it's from train_df
             mu_c = chill_stats[site]['mean']
             sd_c = chill_stats[site]['std'] if chill_stats[site]['std'] > 0 else 1.0
             
@@ -465,6 +514,10 @@ def main():
         # D) Predict on Test
         for _, r in test_df.iterrows():
             site = r['site']
+            # 2.1 Fix: skip if site not in this fold's training set (late debut)
+            if site not in chill_stats:
+                continue
+                
             mu_c = chill_stats[site]['mean']
             sd_c = chill_stats[site]['std'] if chill_stats[site]['std'] > 0 else 1.0
             
@@ -527,37 +580,85 @@ def main():
     xgbr_f = train_residual_stacker(final_train)
     
     # 5. 2026 Forecast
-    print("\nGenerating 2026 Forecast...")
+    print("\nGenerating 2026 Forecast (Patch P0-B Ensemble)...")
+    
+    # Initialize Anomaly Engine
+    try:
+        anomaly_engine = AnomalyEngine(allow_fallback=ALLOW_CLIMATOLOGY_FALLBACK)
+    except FileNotFoundError as e:
+        print(f"CRITICAL ERROR: {e}")
+        return
+
+    noise_pool = prepare_noise_pool(df_daily)
+    
     df_raw_forecast = pd.read_csv('features_2026_forecast.csv')
-    df_forecast = sanitize_forecast_features(df_raw_forecast, df_daily)
+    df_raw_forecast['date'] = pd.to_datetime(df_raw_forecast['date'])
+    # Baseline forecast (normals + monthly anomalies)
+    df_forecast_base = sanitize_forecast_features(df_raw_forecast, df_daily, anomaly_engine=anomaly_engine)
     
     predictions = []
     post_draws = idata.posterior
     
     for site in SITE_DEFS.keys():
-        site_path = df_forecast[df_forecast['site'] == site]
-        if site_path.empty: continue
+        site_path_base = df_forecast_base[df_forecast_base['site'] == site].copy()
+        if site_path_base.empty: continue
         
         mu_c = chill_stats_final[site]['mean']
         sd_c = chill_stats_final[site]['std'] if chill_stats_final[site]['std'] > 0 else 1.0
         
         sims = []
-        for _ in range(1000): # Stochastic ensemble
+        fail_count = 0
+        
+        print(f"  Running ensemble for {site}...")
+        for _ in range(ENSEMBLE_SIZE):
+            # 1. Sample Model Parameters
             d, c = np.random.randint(0, post_draws.draw.size), np.random.randint(0, post_draws.chain.size)
-            
             b_hat = post_draws['b_site'].sel(site=site, draw=d, chain=c).values
             a_hat = post_draws['a_site'].sel(site=site, draw=d, chain=c).values
             
-            tm = simulate_bloom_doy(site_path, a_hat, b_hat, mu_c, sd_c)
+            # 2. Sample Stochastic Path
+            perturbed_path = site_path_base.copy()
+            # Perturb post-cutoff padding only
+            pad_mask = (perturbed_path['is_observed'] == False) & (perturbed_path['date'] > FORECAST_CUTOFF_DATE)
             
-            # Residual
-            bloom_row = site_path[site_path['doy'] == int(tm)]
-            if bloom_row.empty: bloom_row = site_path.iloc[-1:]
+            # Vectorized sampling for efficiency
+            pad_dates = perturbed_path.loc[pad_mask, 'date'].dt.strftime('%m-%d')
+            for m_d in pad_dates.unique():
+                day_mask = (pad_mask) & (perturbed_path['date'].dt.strftime('%m-%d') == m_d)
+                pool_slice = noise_pool[(noise_pool['site'] == site) & (noise_pool['month_day'] == m_d)]
+                if not pool_slice.empty:
+                    # Sample N residuals where N is number of rows for this m_d (usually 1)
+                    resids = pool_slice.sample(n=day_mask.sum(), replace=True)
+                    perturbed_path.loc[day_mask, 'TAVG'] += resids['TAVG_resid'].values
+                    perturbed_path.loc[day_mask, 'TMAX'] += resids['TMAX_resid'].values
+                    perturbed_path.loc[day_mask, 'TMIN'] += resids['TMIN_resid'].values
+            
+            # Enforce physical constraints: TMIN <= TAVG <= TMAX
+            perturbed_path['TMAX'] = np.maximum(perturbed_path['TMAX'], perturbed_path['TAVG'])
+            perturbed_path['TMIN'] = np.minimum(perturbed_path['TMIN'], perturbed_path['TAVG'])
+            
+            # Recalculate cumulative bio-thermal paths
+            perturbed_path = compute_bio_thermal_path(perturbed_path)
+            
+            # 3. Simulate
+            tm = simulate_bloom_doy(perturbed_path, a_hat, b_hat, mu_c, sd_c)
+            if tm == MAY_31_DOY:
+                fail_count += 1
+            
+            # 4. Residual ML Correction (on perturbed snapshot)
+            bloom_row = perturbed_path[perturbed_path['doy'] == int(tm)]
+            if bloom_row.empty: bloom_row = perturbed_path.iloc[-1:]
             
             feats = bloom_row[['ao_30d', 'nao_30d', 'oni_30d', 'vpd_14d']]
             resid = xgbr_f.predict(feats)[0]
             
             sims.append(tm + resid)
+            
+        # Log failure rate
+        fail_rate = fail_count / ENSEMBLE_SIZE
+        print(f"    Fail rate (DOY={MAY_31_DOY}): {fail_rate:.1%}")
+        if fail_rate > 0.1:
+            print(f"    WARNING: High reachability failure rate for {site}")
             
         final_doy = int(round(np.median(sims)))
         predictions.append({

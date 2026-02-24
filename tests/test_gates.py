@@ -4,10 +4,12 @@ import numpy as np
 from datetime import datetime
 import sys
 import os
+import logging
 
 # Import the module to be tested
 sys.path.append(os.getcwd())
 import model_stacker as ms
+from seasonal_anomaly_engine import AnomalyEngine
 
 class TestCompilerGates(unittest.TestCase):
 
@@ -133,31 +135,74 @@ class TestCompilerGates(unittest.TestCase):
         anchors = ms.extract_empirical_anchors(df_path, df_targets)
         self.assertEqual(anchors['washingtondc'], unique_val, "Should have fallen back to DOY 101 (within ±3 days)")
 
-    def test_snapshot_fallback_behavior(self):
-        """ Test if load_data_orchestrator correctly handles missing exact DOY in snapshots """
-        # Directly test the fallback loop logic
-        df_daily = self.df_mock.copy()
-        # Remove ALL intermediate fallbacks to force DOY 103 (the ±3 day edge)
-        forbidden_doys = [100, 101, 99, 102, 98]
-        df_daily = df_daily[~df_daily['doy'].isin(forbidden_doys)].copy()
+class TestAnomalyPerturbation(unittest.TestCase):
+    def setUp(self):
+        self.site = 'washingtondc'
+        # Normals: TAVG=10, TMAX=15, TMIN=5
+        dates = pd.date_range(start='2020-01-01', end='2020-12-31', freq='D')
+        self.df_train = pd.DataFrame({
+            'date': dates,
+            'site': self.site,
+            'TAVG': 10.0, 'TMAX': 15.0, 'TMIN': 5.0,
+            'ao_30d': 0.0, 'nao_30d': 0.0, 'oni_30d': 0.0
+        })
         
-        unique_val = 8888.0
-        df_daily.loc[df_daily['doy'] == 103, 'gdd0_cum'] = unique_val
+        # Forecast: observed up to Feb 28
+        f_dates = pd.date_range(start='2026-01-01', end='2026-02-28', freq='D')
+        self.df_fc = pd.DataFrame({
+            'date': f_dates,
+            'site': self.site,
+            'TAVG': 10.0, 'TMAX': 15.0, 'TMIN': 5.0,
+            'ao_30d': 0.0, 'nao_30d': 0.0, 'oni_30d': 0.0
+        })
+
+    def test_anomaly_application(self):
+        """ T1: Post-cutoff anomaly application correctness """
+        class MockEngine:
+            def get_monthly_anomaly(self, site, year, month, var):
+                if month == 3: return 2.0  # +2C in March
+                return 0.0
         
-        # Target info
-        target_doy = 100
-        path = df_daily 
+        sanitized = ms.sanitize_forecast_features(self.df_fc, self.df_train, anomaly_engine=MockEngine())
         
-        bloom_row = path[path['doy'] == target_doy]
-        if bloom_row.empty:
-            offsets = [1, -1, 2, -2, 3, -3]
-            for off in offsets:
-                fallback_row = path[path['doy'] == target_doy + off]
-                if not fallback_row.empty:
-                    bloom_row = fallback_row
-                    break
+        march_1 = sanitized[sanitized['date'] == '2026-03-01'].iloc[0]
+        feb_28 = sanitized[sanitized['date'] == '2026-02-28'].iloc[0]
         
-        self.assertEqual(bloom_row['gdd0_cum'].iloc[0], unique_val, "Snapshot should fallback to DOY 103")
+        # Feb 28 should be unchanged (observed)
+        self.assertEqual(feb_28['TAVG'], 10.0)
+        # March 1 should be shifted by +2.0
+        self.assertEqual(march_1['TAVG'], 12.0)
+        self.assertEqual(march_1['TMAX'], 17.0)
+        self.assertEqual(march_1['TMIN'], 7.0)
+
+    def test_physical_constraints(self):
+        """ T1: TMIN <= TAVG <= TMAX holds after perturbation """
+        class ExtremeEngine:
+            def get_monthly_anomaly(self, site, year, month, var):
+                if var == 'TMIN': return 20.0 # Push TMIN above others
+                return 0.0
+        
+        sanitized = ms.sanitize_forecast_features(self.df_fc, self.df_train, anomaly_engine=ExtremeEngine())
+        march_1 = sanitized[sanitized['date'] == '2026-03-01'].iloc[0]
+        
+        self.assertTrue(march_1['TMIN'] <= march_1['TAVG'] <= march_1['TMAX'], 
+                        f"Inversion detected: {march_1['TMIN']} > {march_1['TAVG']} or {march_1['TAVG']} > {march_1['TMAX']}")
+
+    def test_fallback_behavior(self):
+        """ T3: Explicit missing-anomaly behavior """
+        # Test 1: Fallback disabled (default)
+        with self.assertRaises(FileNotFoundError):
+            # This will trigger AnomalyEngine init which checks file existence
+            AnomalyEngine(allow_fallback=False)
+            
+        # Test 2: Fallback enabled
+        engine = AnomalyEngine(allow_fallback=True)
+        self.assertTrue(engine.fallback_triggered)
+        
+        # Test sanitization with fallback engine
+        sanitized = ms.sanitize_forecast_features(self.df_fc, self.df_train, anomaly_engine=engine)
+        march_1 = sanitized[sanitized['date'] == '2026-03-01'].iloc[0]
+        self.assertEqual(march_1['TAVG'], 10.0, "Should use unperturbed climatology in fallback")
 
 if __name__ == '__main__':
     unittest.main()

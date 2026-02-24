@@ -146,13 +146,15 @@ def load_teleconnections():
                                       oni_df['MONTH'].astype(str) + '-01')
         oni_df = oni_df[['date', 'ANOM']].set_index('date')
         
+        # Filter out placeholder/sentinel values before interpolation
+        oni_df = oni_df[oni_df['ANOM'] > -90].copy()
+        
         # Upsample to daily and interpolate
         oni_daily = oni_df.resample('D').asfreq()
         oni_daily['ANOM'] = oni_daily['ANOM'].interpolate(method='linear', limit_direction='both')
         
         indices['oni_30d'] = oni_daily['ANOM'].rolling(30, min_periods=1).mean()
         indices['oni_90d'] = oni_daily['ANOM'].rolling(90, min_periods=1).mean()
-
     return pd.DataFrame(indices)
 
 def main():
