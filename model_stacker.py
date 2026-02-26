@@ -111,145 +111,179 @@ def validate_data_contract(df, site):
 # --- Task 2C / Task 4: Bio-Thermal Path Engine ---
 def compute_bio_thermal_path(df):
     """
-    Calculates cumulative GDD0 and Chill7. 
-    Strictly re-computes from TAVG.
+    Recomputes proxy thermal paths from temps:
+      - gdd0_daily/gdd0_cum
+      - chill7_daily/chill7_cum
+      - vpd_14d
+    AND ensures cp/gdd are usable for padded forecast rows:
+      - If cp exists: fill forward into padded region; optionally add new chill-hours increments if cold days occur.
+      - If gdd exists: extend forcing accumulation into padded region from last known gdd.
+      - If cp/gdd do not exist: leaves them absent (mechanistic layer will fallback to chill7/gdd0).
     """
     df = df.sort_values('date').copy()
-    
-    # Explicit GDD semantics
+
+    # --- Proxy GDD0 semantics (always computed) ---
     df["gdd0_daily"] = np.maximum(df["TAVG"] - MODEL_T_BASE_HEAT, 0)
     df["gdd0_cum"] = df["gdd0_daily"].cumsum()
-    
-    # Explicit Chill semantics (Chill Degree Days Base 7)
+
+    # --- Proxy Chill7 semantics (always computed) ---
     df["chill7_daily"] = np.maximum(MODEL_T_BASE_CHILL - df["TAVG"], 0)
     df["chill7_cum"] = df["chill7_daily"].cumsum()
-    
-    # VPD Calculation (approx daily max)
-    # SVP = 0.6108 * exp(17.27 * T / (T + 237.3))
+
+    # --- VPD (always computed) ---
     svp_max = 0.6108 * np.exp((17.27 * df['TMAX']) / (df['TMAX'] + 237.3))
     svp_min = 0.6108 * np.exp((17.27 * df['TMIN']) / (df['TMIN'] + 237.3))
     df['vpd_raw'] = np.maximum(0, svp_max - svp_min)
     df['vpd_14d'] = df['vpd_raw'].rolling(window=14, min_periods=1).mean()
-    
-    # Monotonicity check
+
+    # --- Monotonicity check (proxy path) ---
     if not (df["gdd0_cum"].diff().dropna() >= 0).all():
         raise ValueError("GDD non-monotonicity detected")
-        
+
+    # --- Ensure cp/gdd extend through padded rows if present ---
+    # NOTE: This does NOT create cp/gdd from scratch; it only extends if they exist.
+    # This keeps feature_engineer as the source of truth.
+    if "cp" in df.columns:
+        # If cp has gaps (padded days), extend cp forward with a simple daily chill-hours proxy:
+        # +24 hours when TAVG in [0, 7.2], else +0. This matches the Chilling Hours "band" concept.
+        if df["cp"].isna().any():
+            last_valid = df["cp"].last_valid_index()
+            if last_valid is not None:
+                base_cp = float(df.loc[last_valid, "cp"])
+                after = df.index[df.index > last_valid]
+                if len(after) > 0:
+                    # daily chill hours proxy
+                    chill_hours_daily = 24.0 * ((df.loc[after, "TAVG"] >= 0.0) & (df.loc[after, "TAVG"] <= 7.2)).astype(float)
+                    df.loc[after, "cp"] = base_cp + np.cumsum(chill_hours_daily.values)
+
+    if "gdd" in df.columns:
+        # If gdd has gaps (padded days), extend forcing accumulation from last known gdd.
+        if df["gdd"].isna().any():
+            last_valid = df["gdd"].last_valid_index()
+            if last_valid is not None:
+                base_gdd = float(df.loc[last_valid, "gdd"])
+                after = df.index[df.index > last_valid]
+                if len(after) > 0:
+                    gdd_daily = np.maximum(df.loc[after, "TAVG"] - MODEL_T_BASE_HEAT, 0.0)
+                    df.loc[after, "gdd"] = base_gdd + np.cumsum(gdd_daily.values)
+
     return df
 
 # --- Task 4: Empirical Anchors ---
 def extract_empirical_anchors(df_daily, df_targets):
     """
-    Computes site-specific mu_anchors from daily paths at bloom DOY.
+    Computes site-specific anchor medians in forcing space at bloom.
+    Prefers 'gdd' (post-chill forcing) if available; falls back to 'gdd0_cum'.
     """
     site_anchors = {}
-    
+
+    HEAT_COL = "gdd" if "gdd" in df_daily.columns else "gdd0_cum"
+
     for site in SITE_DEFS.keys():
         s_targets = df_targets[df_targets['site'] == site]
-        gdd_at_bloom = []
-        
+        heat_at_bloom = []
+
         for _, row in s_targets.iterrows():
-            # Get path for this year
             path = df_daily[(df_daily['site'] == site) & (df_daily['bio_year'] == row['bio_year'])]
-            if path.empty: continue
-            
-            # Extract exactly at bloom DOY with ±3 day fallback
+            if path.empty:
+                continue
+
             target_doy = int(round(row['bloom_doy']))
             bloom_row = path[path['doy'] == target_doy]
-            
+
             if bloom_row.empty:
-                # Bounded nearest-day fallback (±3 days)
                 offsets = [1, -1, 2, -2, 3, -3]
                 for off in offsets:
                     fallback_row = path[path['doy'] == target_doy + off]
                     if not fallback_row.empty:
                         bloom_row = fallback_row
                         break
-            
-            if not bloom_row.empty:
-                gdd_at_bloom.append(bloom_row['gdd0_cum'].values[0])
-        
-        if gdd_at_bloom:
-            site_anchors[site] = np.median(gdd_at_bloom)
-        else:
-            site_anchors[site] = None # Will fill with global median later
-            
-    # Fallback to global median
-    valid_anchors = [v for v in site_anchors.values() if v is not None]
-    global_median = np.median(valid_anchors) if valid_anchors else 1000.0
-    
+
+            if not bloom_row.empty and HEAT_COL in bloom_row.columns:
+                heat_at_bloom.append(float(bloom_row[HEAT_COL].values[0]))
+
+        site_anchors[site] = np.median(heat_at_bloom) if heat_at_bloom else None
+
+    valid = [v for v in site_anchors.values() if v is not None]
+    global_median = np.median(valid) if valid else 1000.0
+
     for site in site_anchors:
         if site_anchors[site] is None:
             site_anchors[site] = global_median
-            
+
     return site_anchors
 
 # --- Task 5: PyMC Model (Smooth Likelihood) ---
 def build_hierarchical_model(train_data, site_anchors, sites_map, coords):
     """
-    V5.0: Linear Synergy + Smooth GDD-Space Likelihood.
-    No discrete tripwire in sampler.
+    Hierarchical mechanistic model in forcing space:
+      Observed: heat_at_bloom  (prefers gdd_at_bloom, fallback gdd0_cum_at_bloom)
+      Chill covariate: chill_at_bloom (prefers cp_at_bloom, fallback chill7_cum_at_bloom)
     """
     mu_a_anchors = np.array([site_anchors[s] for s in coords['site']])
-    
-    # Calculate per-site chill standardization parameters
-    chill_stats = train_data.groupby('site')['chill7_cum_at_bloom'].agg(['mean', 'std']).to_dict('index')
-    
+
+    # Choose biology columns
+    CHILL_COL = "cp_at_bloom" if "cp_at_bloom" in train_data.columns else "chill7_cum_at_bloom"
+    HEAT_COL  = "gdd_at_bloom" if "gdd_at_bloom" in train_data.columns else "gdd0_cum_at_bloom"
+
+    if CHILL_COL not in train_data.columns:
+        raise ValueError(f"Missing chill column for model: expected cp_at_bloom or chill7_cum_at_bloom")
+    if HEAT_COL not in train_data.columns:
+        raise ValueError(f"Missing heat column for model: expected gdd_at_bloom or gdd0_cum_at_bloom")
+
+    chill_stats = train_data.groupby('site')[CHILL_COL].agg(['mean', 'std']).to_dict('index')
+
     with pm.Model(coords=coords) as model:
         site_idx = train_data['site'].map(sites_map).values
-        
-        # 1. Base Heat Requirement (a_site)
+
+        # ---- a_site: base heat requirement centered at empirical anchors ----
         offset_raw_a = pm.StudentT('offset_raw_a', nu=3, mu=0, sigma=1, dims='site')
-        # Tightened sigma_a from 100 to 50
         sigma_a = pm.HalfNormal('sigma_a', sigma=50)
         mu_global_a = pm.Normal('mu_global_a', mu=0, sigma=50)
-        
         a_site = pm.Deterministic('a_site', mu_a_anchors + mu_global_a + offset_raw_a * sigma_a, dims='site')
-        
-        # 2. Chill Sensitivity (b_site) - Standardized Scale
-        # Standardization: (chill - mean) / std
+
+        # ---- chill standardization (z-score per site) ----
         chill_means = np.array([chill_stats[s]['mean'] for s in train_data['site']])
-        chill_stds = np.array([chill_stats[s]['std'] if chill_stats[s]['std'] > 0 else 1.0 for s in train_data['site']])
-        chill_stdized = (train_data['chill7_cum_at_bloom'].values - chill_means) / chill_stds
-        
-        # With standardized chill (z-score), b represents change in GDD per 1-SD of chill.
-        # Prior centered near 0 or mildly negative.
-        mu_global_b = pm.Normal('mu_global_b', mu=-100.0, sigma=100.0) 
+        chill_stds  = np.array([chill_stats[s]['std'] if chill_stats[s]['std'] > 0 else 1.0 for s in train_data['site']])
+        chill_stdized = (train_data[CHILL_COL].values - chill_means) / chill_stds
+
+        # ---- b_site: sensitivity of heat requirement to chill (per 1-SD chill) ----
+        mu_global_b = pm.Normal('mu_global_b', mu=-100.0, sigma=100.0)
         sigma_b = pm.HalfNormal('sigma_b', sigma=50.0)
         offset_raw_b = pm.StudentT('offset_raw_b', nu=3, mu=0, sigma=1, dims='site')
-        
         b_site = pm.Deterministic('b_site', mu_global_b + offset_raw_b * sigma_b, dims='site')
-        
-        # 3. Model Prediction (GDD Threshold)
+
+        # ---- threshold in heat space ----
         F_star = a_site[site_idx] + b_site[site_idx] * chill_stdized
-        
-        # 4. Smooth Likelihood
-        # Tightened sigma_obs from 100 to 50
+
         sigma_obs = pm.HalfNormal('sigma_obs', sigma=50, dims='site')
-        pm.Normal('obs', mu=F_star, sigma=sigma_obs[site_idx], observed=train_data['gdd0_cum_at_bloom'].values)
-        
+        pm.Normal('obs', mu=F_star, sigma=sigma_obs[site_idx], observed=train_data[HEAT_COL].values)
+
     return model
 
 # --- Task 6: Mechanistic Simulation ---
 def simulate_bloom_doy(daily_path, a_hat, b_hat, mu_c, sd_c):
     """
-    Simulates bloom DOY in standardized space.
-    threshold(t) = a_hat + b_hat * [(Chill(t) - mu_c) / sd_c]
+    Simulates bloom DOY in standardized chill space.
+    Prefers cp/gdd if available; falls back to chill7/gdd0.
     """
     path = daily_path.reset_index(drop=True)
-    # Standardize path chill using site-specific stats from training
-    chill_stdized = (path['chill7_cum'] - mu_c) / sd_c
+
+    CHILL_PATH_COL = "cp" if "cp" in path.columns else "chill7_cum"
+    HEAT_PATH_COL  = "gdd" if "gdd" in path.columns else "gdd0_cum"
+
+    # Standardize chill using training stats passed in (mu_c/sd_c)
+    chill_stdized = (path[CHILL_PATH_COL] - mu_c) / (sd_c if sd_c > 0 else 1.0)
     threshold = a_hat + b_hat * chill_stdized
-    
-    # Tripwire crossing
-    # Must occur after March 1st (DOY 60) for biological plausibility
-    mask = (path['doy'] >= 60) & (path['gdd0_cum'] >= threshold)
-    
+
+    # Must occur after March 1 (DOY 60) for plausibility
+    mask = (path['doy'] >= 60) & (path[HEAT_PATH_COL] >= threshold)
+
     crossings = path.index[mask]
     if len(crossings) > 0:
-        return min(path.loc[crossings[0], 'doy'], MAY_31_DOY)
-    
-    return MAY_31_DOY # Sentinel
+        return min(int(path.loc[crossings[0], 'doy']), MAY_31_DOY)
+
+    return MAY_31_DOY
 
 # --- Task 7: Residual Firewall ---
 def train_residual_stacker(df_train):
@@ -466,11 +500,24 @@ def load_data_orchestrator(features_path, targets_dir):
         if not bloom_row.empty:
             feat = bloom_row.iloc[0].copy() # Snapshots features at bloom
             feat['bloom_doy'] = row['bloom_doy']
-            # Explicit Semantic Locks
-            feat['gdd0_cum_at_bloom'] = feat['gdd0_cum']
-            feat['chill7_cum_at_bloom'] = feat['chill7_cum']
+            # Explicit Semantic Locks (proxy paths always present)
+            feat['gdd0_cum_at_bloom'] = float(feat['gdd0_cum'])
+            feat['chill7_cum_at_bloom'] = float(feat['chill7_cum'])
+
+            # Biological locks (preferred if present; fall back to proxies)
+            # cp/gdd come from feature_engineer (Chilling Hours or DCM-derived), but may be absent in older artifacts.
+            if 'cp' in feat.index and pd.notna(feat['cp']):
+                feat['cp_at_bloom'] = float(feat['cp'])
+            else:
+                feat['cp_at_bloom'] = float(feat['chill7_cum'])  # fallback proxy
+
+            if 'gdd' in feat.index and pd.notna(feat['gdd']):
+                feat['gdd_at_bloom'] = float(feat['gdd'])
+            else:
+                feat['gdd_at_bloom'] = float(feat['gdd0_cum'])   # fallback proxy
+
             training_rows.append(feat)
-            
+                        
     df_train_agg = pd.DataFrame(training_rows)
     
     return df_train_agg, df_daily, df_targets
