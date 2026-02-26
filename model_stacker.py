@@ -18,10 +18,19 @@ MODEL_T_BASE_HEAT = 0.0      # GDD0
 MODEL_T_BASE_CHILL = 7.0     # Reference base for chill units
 
 # Patch P0-B Config
-ALLOW_CLIMATOLOGY_FALLBACK = False
+ALLOW_CLIMATOLOGY_FALLBACK = True
 ENSEMBLE_SIZE = 100
 RANDOM_SEED = 2026
 np.random.seed(RANDOM_SEED)
+
+# --- Submission Controls ---
+# Keep residual stacker OFF until rebuilt with winner-style Oct–Mar meteorological features.
+USE_RESIDUAL_STACKER = False
+
+# Sparse-site climatology anchoring (NYC/Vancouver): blend mechanistic prediction toward
+# historical median based on training support.
+USE_CLIMATOLOGY_ANCHOR = True
+CLIMATOLOGY_ANCHOR_DENOM_YEARS = 10.0  # w = min(n / denom, 1.0)
 
 # Simplified SITE_DEFS (Task 1)
 SITE_DEFS = {
@@ -247,40 +256,61 @@ def train_residual_stacker(df_train):
     """
     Trains XGBoost only on valid mechanistic predictions.
     Uses MAD-based outlier filtering.
+    Sparse sites (< MIN_SITE_ROWS) are excluded from stacker training
+    and will receive zero residual correction at prediction time,
+    trusting the mechanistic model alone.
     """
+    MIN_SITE_ROWS = 10
+
     # 1. Exclude Sentinels
     df_valid = df_train[df_train['t_mech'] != MAY_31_DOY].copy()
-    
+
     features = ['ao_30d', 'nao_30d', 'oni_30d', 'vpd_14d']
     keep_indices = []
-    
+    sparse_sites = []
+
     for site in SITE_DEFS.keys():
         site_data = df_valid[df_valid['site'] == site]
-        if site_data.empty: continue
-        
+        if site_data.empty:
+            continue
+
+        # Skip sparse sites - stacker cannot learn reliably from too few points
+        if len(site_data) < MIN_SITE_ROWS:
+            sparse_sites.append(site)
+            print(f"[Stacker] Skipping {site}: only {len(site_data)} rows (min={MIN_SITE_ROWS}). "
+                  f"Will use mechanistic prediction only.")
+            continue
+
         resid_abs = np.abs(site_data['resid'])
         med = resid_abs.median()
         mad = (resid_abs - med).abs().median() + 1e-6
-        
+
         # Threshold: median + 2.5 * MAD
         mask = resid_abs < (med + 2.5 * mad)
         keep_indices.extend(site_data[mask].index.tolist())
-        
+
     df_firewalled = df_valid.loc[keep_indices]
-    
+
     # Check for empty set
     if df_firewalled.empty:
-        print("Warning: Firewall removed all data. Falling back to unfiltered valid.")
+        print("[Stacker] Warning: Firewall removed all data. Falling back to unfiltered valid.")
         df_firewalled = df_valid
 
     # Ensure features exist
     for f in features:
-        if f not in df_firewalled.columns: df_firewalled[f] = 0.0
-            
-    xgbr = xgb.XGBRegressor(max_depth=2, n_estimators=100, learning_rate=0.05, reg_lambda=10, random_state=42)
+        if f not in df_firewalled.columns:
+            df_firewalled[f] = 0.0
+
+    xgbr = xgb.XGBRegressor(
+        max_depth=2,
+        n_estimators=100,
+        learning_rate=0.05,
+        reg_lambda=10,
+        random_state=42
+    )
     xgbr.fit(df_firewalled[features], df_firewalled['resid'])
-    
-    return xgbr
+
+    return xgbr, sparse_sites
 
 # --- Task 8: Forecast Sanitization ---
 def sanitize_forecast_features(df_forecast, df_train_daily, anomaly_engine=None):
@@ -360,8 +390,6 @@ def sanitize_forecast_features(df_forecast, df_train_daily, anomaly_engine=None)
         
     return pd.concat(processed)
         
-    return pd.concat(processed)
-
 def prepare_noise_pool(df_daily):
     """
     Computes daily residuals (observed - climatology) from historical data
@@ -380,7 +408,7 @@ def prepare_noise_pool(df_daily):
         
     return df[['site', 'month_day', 'TAVG_resid', 'TMAX_resid', 'TMIN_resid']]
 
-# --- Orchestrator ---
+# Orchestrator 
 
 def load_data_orchestrator(features_path, targets_dir):
     df_raw = pd.read_csv(features_path)
@@ -447,141 +475,248 @@ def load_data_orchestrator(features_path, targets_dir):
     
     return df_train_agg, df_daily, df_targets
 
+def compute_site_training_stats(df_targets: pd.DataFrame):
+    """
+    Compute per-site training counts and historical median bloom DOY from observed targets.
+    Counts are #distinct bio_year rows per site.
+    Medians are median(bloom_doy) per site.
+    """
+    required = {'site', 'bio_year', 'bloom_doy'}
+    missing = required - set(df_targets.columns)
+    if missing:
+        raise ValueError(f"df_targets missing required columns: {sorted(missing)}")
+
+    t = df_targets.drop_duplicates(subset=['site', 'bio_year']).copy()
+    counts = t.groupby('site')['bio_year'].nunique().to_dict()
+    medians = t.groupby('site')['bloom_doy'].median().round().astype(int).to_dict()
+    return counts, medians
+
+
+def blend_with_climatology(site: str, mech_pred_doy: float, site_counts: dict, site_medians: dict) -> int:
+    """
+    w = min(n / CLIMATOLOGY_ANCHOR_DENOM_YEARS, 1)
+    pred = w * mech_pred + (1 - w) * median
+    """
+    if site not in site_counts or site not in site_medians:
+        return int(round(mech_pred_doy))  # unseen site fallback
+
+    n = float(site_counts[site])
+    w = min(n / float(CLIMATOLOGY_ANCHOR_DENOM_YEARS), 1.0)
+    median = float(site_medians[site])
+    return int(round(w * float(mech_pred_doy) + (1.0 - w) * median))
+
 def main():
     print("Initializing V5.0 God-Tier Architecture")
-    
-    # 1. Data Ingestion
+
+    # -----------------------------
+    # Submission Controls (P1/P2)
+    # -----------------------------
+    USE_RESIDUAL_STACKER = False          # Priority 2: disable stacker until rebuilt
+    USE_CLIMATOLOGY_ANCHOR = True         # Priority 1: anchor sparse sites
+    CLIMATOLOGY_ANCHOR_DENOM_YEARS = 10.0 # w = min(n/denom, 1)
+
+    def _compute_site_training_stats(df_siteyear: pd.DataFrame):
+        """
+        Compute per-site support (n unique bio_year) + historical median bloom_doy
+        from the *actual training table* df_agg/train_df (not raw targets spanning centuries).
+        Requires columns: site, bio_year, bloom_doy
+        """
+        req = {'site', 'bio_year', 'bloom_doy'}
+        missing = req - set(df_siteyear.columns)
+        if missing:
+            raise ValueError(f"Training df missing required columns: {sorted(missing)}")
+
+        t = df_siteyear.dropna(subset=['bloom_doy']).drop_duplicates(subset=['site', 'bio_year']).copy()
+        counts = t.groupby('site')['bio_year'].nunique().to_dict()
+        medians = t.groupby('site')['bloom_doy'].median().round().astype(int).to_dict()
+        return counts, medians
+
+    def _blend_with_climatology(site: str, pred_doy: float, site_counts: dict, site_medians: dict) -> int:
+        """
+        Blend prediction toward site median based on support:
+          w = min(n/denom, 1)
+          blended = w*pred + (1-w)*median
+        """
+        if (site not in site_counts) or (site not in site_medians):
+            return int(round(pred_doy))
+        n = float(site_counts[site])
+        w = min(n / float(CLIMATOLOGY_ANCHOR_DENOM_YEARS), 1.0)
+        med = float(site_medians[site])
+        return int(round(w * float(pred_doy) + (1.0 - w) * med))
+
+    # -----------------------------
+    # 1) Data Ingestion
+    # -----------------------------
     df_agg, df_daily, df_targets = load_data_orchestrator('features_train.csv', 'data')
-    
-    # 2. Empirical Anchors
+
+    # Global climatology stats based on the *actual training table* df_agg
+    site_counts_global, site_medians_global = _compute_site_training_stats(df_agg)
+
+    # -----------------------------
+    # 2) Empirical Anchors
+    # -----------------------------
     site_anchors = extract_empirical_anchors(df_daily, df_targets)
     print("Empirical Anchors (GDD0):", site_anchors)
-    
+
     sites = sorted(df_agg['site'].unique())
     sites_map = {s: i for i, s in enumerate(sites)}
     coords = {'site': sites}
-    
-    # 3. Expanding Window Validation (Time-Safe)
+
+    # -----------------------------
+    # 3) Expanding Window Validation (Time-Safe)
+    # -----------------------------
     validation_years = sorted([y for y in df_agg['bio_year'].unique() if y >= 2015])
-    
+
     audit_results = []
     print(f"\nStarting Expanding Window Audit (2015-2024)...")
-    
+
     for test_year in validation_years:
-        if test_year > 2024: continue
-        
+        if test_year > 2024:
+            continue
+
         train_mask = df_agg['bio_year'] < test_year
         test_mask = df_agg['bio_year'] == test_year
-        
+
         train_df = df_agg[train_mask].copy()
         test_df = df_agg[test_mask].copy()
-        
-        if train_df.empty or test_df.empty: continue
-        
+
+        if train_df.empty or test_df.empty:
+            continue
+
+        # Fold-specific climatology stats (based on available training support in this fold)
+        fold_counts, fold_medians = _compute_site_training_stats(train_df)
+
         # 2.1 Fix: Time-safe anchors for audit loop
         site_anchors_fold = extract_empirical_anchors(
-            df_daily[df_daily['bio_year'] < test_year], 
+            df_daily[df_daily['bio_year'] < test_year],
             df_targets[df_targets['bio_year'] < test_year]
         )
-        
+
         # A) Fit Mechanistic
         with build_hierarchical_model(train_df, site_anchors_fold, sites_map, coords) as model:
-            trace = pm.sample(1000, tune=1000, cores=1, target_accept=0.999, progressbar=False, random_seed=42)
-        
+            trace = pm.sample(
+                1000, tune=1000, cores=1, target_accept=0.999,
+                progressbar=False, random_seed=42
+            )
+
         post = trace.posterior.mean(dim=['chain', 'draw'])
         chill_stats = train_df.groupby('site')['chill7_cum_at_bloom'].agg(['mean', 'std']).to_dict('index')
-        
+
         # B) Infer t_mech on Train (Standardized Space)
         t_mech_train = []
         for _, r in train_df.iterrows():
             site = r['site']
-            # Site is guaranteed to be in chill_stats because it's from train_df
             mu_c = chill_stats[site]['mean']
             sd_c = chill_stats[site]['std'] if chill_stats[site]['std'] > 0 else 1.0
-            
+
             b_hat = post['b_site'].sel(site=site).values
             a_hat = post['a_site'].sel(site=site).values
-            
-            path = df_daily[(df_daily['site']==site) & (df_daily['bio_year']==r['bio_year'])]
+
+            path = df_daily[(df_daily['site'] == site) & (df_daily['bio_year'] == r['bio_year'])]
             tm = simulate_bloom_doy(path, a_hat, b_hat, mu_c, sd_c)
             t_mech_train.append(tm)
+
         train_df['t_mech'] = t_mech_train
         train_df['resid'] = train_df['bloom_doy'] - train_df['t_mech']
-        
-        # C) Train Residual Model
-        xgbr = train_residual_stacker(train_df)
-        
+
+        # C) Residual Model (disabled by default)
+        xgbr, sparse_sites = (None, set())
+        if USE_RESIDUAL_STACKER:
+            xgbr, sparse_sites = train_residual_stacker(train_df)
+
         # D) Predict on Test
         for _, r in test_df.iterrows():
             site = r['site']
+
             # 2.1 Fix: skip if site not in this fold's training set (late debut)
             if site not in chill_stats:
                 continue
-                
+
             mu_c = chill_stats[site]['mean']
             sd_c = chill_stats[site]['std'] if chill_stats[site]['std'] > 0 else 1.0
-            
+
             b_hat = post['b_site'].sel(site=site).values
             a_hat = post['a_site'].sel(site=site).values
-            
-            path = df_daily[(df_daily['site']==site) & (df_daily['bio_year']==r['bio_year'])]
+
+            path = df_daily[(df_daily['site'] == site) & (df_daily['bio_year'] == r['bio_year'])]
             tm = simulate_bloom_doy(path, a_hat, b_hat, mu_c, sd_c)
-            
-            # Residual Features
-            bloom_row = path[path['doy'] == int(tm)]
-            if bloom_row.empty: bloom_row = path.iloc[-1:] 
-            
-            feats = bloom_row[['ao_30d', 'nao_30d', 'oni_30d', 'vpd_14d']]
-            for c in ['ao_30d', 'nao_30d', 'oni_30d', 'vpd_14d']:
-                if c not in feats.columns: feats[c] = 0.0
-            
-            resid_pred = xgbr.predict(feats)[0]
-            th = tm + resid_pred
-            
+
+            # Residual ML Correction (disabled unless flag enabled)
+            if (not USE_RESIDUAL_STACKER) or (xgbr is None) or (site in sparse_sites):
+                resid_pred = 0.0
+            else:
+                bloom_row = path[path['doy'] == int(tm)]
+                if bloom_row.empty:
+                    bloom_row = path.iloc[-1:]
+                feats = bloom_row[['ao_30d', 'nao_30d', 'oni_30d', 'vpd_14d']]
+                resid_pred = float(xgbr.predict(feats)[0])
+
+            pred_mech = float(tm)
+            pred_hybrid = float(tm) + float(resid_pred)
+
+            # Priority 1: climatology anchor for sparse sites (applied to final preds)
+            if USE_CLIMATOLOGY_ANCHOR:
+                pred_mech = _blend_with_climatology(site, pred_mech, fold_counts, fold_medians)
+                pred_hybrid = _blend_with_climatology(site, pred_hybrid, fold_counts, fold_medians)
+
             audit_results.append({
-                'site': r['site'],
-                'year': test_year,
-                'mae_mech': abs(r['bloom_doy'] - tm),
-                'mae_hybrid': abs(r['bloom_doy'] - th)
+                'site': site,
+                'year': int(test_year),
+                'mae_mech': abs(float(r['bloom_doy']) - float(pred_mech)),
+                'mae_hybrid': abs(float(r['bloom_doy']) - float(pred_hybrid))
             })
-            
+
     # Report
     audit_df = pd.DataFrame(audit_results)
     print("\n=== Ablation Report (Expanding Window) ===")
-    print(audit_df.groupby('site')[['mae_mech', 'mae_hybrid']].mean())
-    print("Overall:", audit_df[['mae_mech', 'mae_hybrid']].mean())
-    
-    # 4. Final Production Run
+    if not audit_df.empty:
+        print(audit_df.groupby('site')[['mae_mech', 'mae_hybrid']].mean())
+        print("Overall:", audit_df[['mae_mech', 'mae_hybrid']].mean())
+    else:
+        print("No audit results produced (check validation_years / data coverage).")
+
+    # -----------------------------
+    # 4) Final Production Run
+    # -----------------------------
     print("\nTraining Final Production Model (All History)...")
-    final_train = df_agg[df_agg['bio_year'] <= 2025].copy() 
-    
+    final_train = df_agg[df_agg['bio_year'] <= 2025].copy()
+
     with build_hierarchical_model(final_train, site_anchors, sites_map, coords) as model:
-        idata = pm.sample(2000, tune=2000, cores=1, target_accept=0.999, progressbar=False, random_seed=2026)
-        
+        idata = pm.sample(
+            2000, tune=2000, cores=1, target_accept=0.999,
+            progressbar=False, random_seed=2026
+        )
+
     post_f = idata.posterior.mean(dim=['chain', 'draw'])
     chill_stats_final = final_train.groupby('site')['chill7_cum_at_bloom'].agg(['mean', 'std']).to_dict('index')
-    
+
     # Re-sim mechanics on full set (Standardized Space)
     t_mech_final = []
     for _, r in final_train.iterrows():
         site = r['site']
         mu_c = chill_stats_final[site]['mean']
         sd_c = chill_stats_final[site]['std'] if chill_stats_final[site]['std'] > 0 else 1.0
-        
+
         b_hat = post_f['b_site'].sel(site=site).values
         a_hat = post_f['a_site'].sel(site=site).values
-        
-        path = df_daily[(df_daily['site']==site) & (df_daily['bio_year']==r['bio_year'])]
+
+        path = df_daily[(df_daily['site'] == site) & (df_daily['bio_year'] == r['bio_year'])]
         tm = simulate_bloom_doy(path, a_hat, b_hat, mu_c, sd_c)
         t_mech_final.append(tm)
+
     final_train['t_mech'] = t_mech_final
     final_train['resid'] = final_train['bloom_doy'] - final_train['t_mech']
-    
-    xgbr_f = train_residual_stacker(final_train)
-    
-    # 5. 2026 Forecast
+
+    # Final production stacker (disabled unless flag enabled)
+    xgbr_f, sparse_sites_f = (None, set())
+    if USE_RESIDUAL_STACKER:
+        xgbr_f, sparse_sites_f = train_residual_stacker(final_train)
+
+    # -----------------------------
+    # 5) 2026 Forecast
+    # -----------------------------
     print("\nGenerating 2026 Forecast (Patch P0-B Ensemble)...")
-    
+
     # Initialize Anomaly Engine
     try:
         anomaly_engine = AnomalyEngine(allow_fallback=ALLOW_CLIMATOLOGY_FALLBACK)
@@ -590,87 +725,99 @@ def main():
         return
 
     noise_pool = prepare_noise_pool(df_daily)
-    
+
     df_raw_forecast = pd.read_csv('features_2026_forecast.csv')
     df_raw_forecast['date'] = pd.to_datetime(df_raw_forecast['date'])
+
     # Baseline forecast (normals + monthly anomalies)
     df_forecast_base = sanitize_forecast_features(df_raw_forecast, df_daily, anomaly_engine=anomaly_engine)
-    
+
     predictions = []
     post_draws = idata.posterior
-    
+
+    cutoff_ts = pd.to_datetime(FORECAST_CUTOFF_DATE)
+
     for site in SITE_DEFS.keys():
         site_path_base = df_forecast_base[df_forecast_base['site'] == site].copy()
-        if site_path_base.empty: continue
-        
+        if site_path_base.empty:
+            continue
+
         mu_c = chill_stats_final[site]['mean']
         sd_c = chill_stats_final[site]['std'] if chill_stats_final[site]['std'] > 0 else 1.0
-        
+
         sims = []
         fail_count = 0
-        
+
         print(f"  Running ensemble for {site}...")
         for _ in range(ENSEMBLE_SIZE):
-            # 1. Sample Model Parameters
-            d, c = np.random.randint(0, post_draws.draw.size), np.random.randint(0, post_draws.chain.size)
+            # 1) Sample Model Parameters
+            d = np.random.randint(0, post_draws.draw.size)
+            c = np.random.randint(0, post_draws.chain.size)
             b_hat = post_draws['b_site'].sel(site=site, draw=d, chain=c).values
             a_hat = post_draws['a_site'].sel(site=site, draw=d, chain=c).values
-            
-            # 2. Sample Stochastic Path
+
+            # 2) Sample Stochastic Path
             perturbed_path = site_path_base.copy()
+
             # Perturb post-cutoff padding only
-            pad_mask = (perturbed_path['is_observed'] == False) & (perturbed_path['date'] > FORECAST_CUTOFF_DATE)
-            
-            # Vectorized sampling for efficiency
+            pad_mask = (perturbed_path['is_observed'] == False) & (perturbed_path['date'] > cutoff_ts)
+
             pad_dates = perturbed_path.loc[pad_mask, 'date'].dt.strftime('%m-%d')
             for m_d in pad_dates.unique():
-                day_mask = (pad_mask) & (perturbed_path['date'].dt.strftime('%m-%d') == m_d)
+                day_mask = pad_mask & (perturbed_path['date'].dt.strftime('%m-%d') == m_d)
                 pool_slice = noise_pool[(noise_pool['site'] == site) & (noise_pool['month_day'] == m_d)]
                 if not pool_slice.empty:
-                    # Sample N residuals where N is number of rows for this m_d (usually 1)
-                    resids = pool_slice.sample(n=day_mask.sum(), replace=True)
+                    resids = pool_slice.sample(n=int(day_mask.sum()), replace=True)
                     perturbed_path.loc[day_mask, 'TAVG'] += resids['TAVG_resid'].values
                     perturbed_path.loc[day_mask, 'TMAX'] += resids['TMAX_resid'].values
                     perturbed_path.loc[day_mask, 'TMIN'] += resids['TMIN_resid'].values
-            
+
             # Enforce physical constraints: TMIN <= TAVG <= TMAX
             perturbed_path['TMAX'] = np.maximum(perturbed_path['TMAX'], perturbed_path['TAVG'])
             perturbed_path['TMIN'] = np.minimum(perturbed_path['TMIN'], perturbed_path['TAVG'])
-            
+
             # Recalculate cumulative bio-thermal paths
             perturbed_path = compute_bio_thermal_path(perturbed_path)
-            
-            # 3. Simulate
+
+            # 3) Simulate
             tm = simulate_bloom_doy(perturbed_path, a_hat, b_hat, mu_c, sd_c)
             if tm == MAY_31_DOY:
                 fail_count += 1
-            
-            # 4. Residual ML Correction (on perturbed snapshot)
-            bloom_row = perturbed_path[perturbed_path['doy'] == int(tm)]
-            if bloom_row.empty: bloom_row = perturbed_path.iloc[-1:]
-            
-            feats = bloom_row[['ao_30d', 'nao_30d', 'oni_30d', 'vpd_14d']]
-            resid = xgbr_f.predict(feats)[0]
-            
-            sims.append(tm + resid)
-            
+
+            # 4) Residual ML correction (disabled unless flag enabled)
+            if (not USE_RESIDUAL_STACKER) or (xgbr_f is None) or (site in sparse_sites_f):
+                resid = 0.0
+            else:
+                bloom_row = perturbed_path[perturbed_path['doy'] == int(tm)]
+                if bloom_row.empty:
+                    bloom_row = perturbed_path.iloc[-1:]
+                feats = bloom_row[['ao_30d', 'nao_30d', 'oni_30d', 'vpd_14d']]
+                resid = float(xgbr_f.predict(feats)[0])
+
+            sims.append(float(tm) + float(resid))
+
         # Log failure rate
-        fail_rate = fail_count / ENSEMBLE_SIZE
+        fail_rate = fail_count / float(ENSEMBLE_SIZE)
         print(f"    Fail rate (DOY={MAY_31_DOY}): {fail_rate:.1%}")
         if fail_rate > 0.1:
             print(f"    WARNING: High reachability failure rate for {site}")
-            
+
         final_doy = int(round(np.median(sims)))
+
+        # Priority 1: climatology anchor (global stats)
+        if USE_CLIMATOLOGY_ANCHOR:
+            final_doy = _blend_with_climatology(site, final_doy, site_counts_global, site_medians_global)
+
         predictions.append({
             'location': site.replace('newyorkcity', 'nyc'),
             'year': 2026,
             'prediction': final_doy
         })
-        
+
     sub = pd.DataFrame(predictions)
     print("\n=== Final Submission ===")
     print(sub)
     sub.to_csv('submission_2026.csv', index=False)
-
+    
 if __name__ == "__main__":
     main()

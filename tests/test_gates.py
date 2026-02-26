@@ -189,20 +189,29 @@ class TestAnomalyPerturbation(unittest.TestCase):
                         f"Inversion detected: {march_1['TMIN']} > {march_1['TAVG']} or {march_1['TAVG']} > {march_1['TMAX']}")
 
     def test_fallback_behavior(self):
-        """ T3: Explicit missing-anomaly behavior """
-        # Test 1: Fallback disabled (default)
-        with self.assertRaises(FileNotFoundError):
-            # This will trigger AnomalyEngine init which checks file existence
-            AnomalyEngine(allow_fallback=False)
-            
-        # Test 2: Fallback enabled
-        engine = AnomalyEngine(allow_fallback=True)
-        self.assertTrue(engine.fallback_triggered)
-        
-        # Test sanitization with fallback engine
-        sanitized = ms.sanitize_forecast_features(self.df_fc, self.df_train, anomaly_engine=engine)
-        march_1 = sanitized[sanitized['date'] == '2026-03-01'].iloc[0]
-        self.assertEqual(march_1['TAVG'], 10.0, "Should use unperturbed climatology in fallback")
+        """ T3: Explicit missing-anomaly behavior (robust even if CSV exists in repo) """
+        import seasonal_anomaly_engine as sae
 
+        original_path = sae.ANOMALY_CSV_PATH
+        try:
+            # Force a missing anomaly file path for this test
+            sae.ANOMALY_CSV_PATH = "data/external/__definitely_missing_seasonal_anomalies__.csv"
+
+            # Test 1: Fallback disabled -> should hard-fail
+            with self.assertRaises(FileNotFoundError):
+                sae.AnomalyEngine(allow_fallback=False)
+
+            # Test 2: Fallback enabled -> should not fail and should flag fallback
+            engine = sae.AnomalyEngine(allow_fallback=True)
+            self.assertTrue(engine.fallback_triggered)
+
+            # Test sanitization with fallback engine (should use deterministic climatology)
+            sanitized = ms.sanitize_forecast_features(self.df_fc, self.df_train, anomaly_engine=engine)
+            march_1 = sanitized[sanitized['date'] == '2026-03-01'].iloc[0]
+            self.assertEqual(march_1['TAVG'], 10.0, "Should use unperturbed climatology in fallback")
+
+        finally:
+            # Always restore original path to avoid side effects on other tests
+            sae.ANOMALY_CSV_PATH = original_path
 if __name__ == '__main__':
     unittest.main()

@@ -96,10 +96,10 @@ def process_station(location_name, station_id, start_year, end_year):
             df[col] = float('nan')
             
     # Convert from tenths of degrees to standard degrees Celsius (NOAA standard quirk)
-    df['TMAX'] = df['TMAX'] / 10.0
-    df['TMIN'] = df['TMIN'] / 10.0
-    if df['TAVG'].notna().any():
-        df['TAVG'] = df['TAVG'] / 10.0
+    # df['TMAX'] = df['TMAX'] / 10.0
+    # df['TMIN'] = df['TMIN'] / 10.0
+    # if df['TAVG'].notna().any():
+    #     df['TAVG'] = df['TAVG'] / 10.0
         
     # Impute missing TAVG using the mathematical average
     df['TAVG'] = df['TAVG'].fillna((df['TMAX'] + df['TMIN']) / 2.0)
