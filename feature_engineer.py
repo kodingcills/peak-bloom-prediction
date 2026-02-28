@@ -207,7 +207,7 @@ def load_teleconnections():
         # Remove sentinel values BEFORE interpolation — prevents -99.9
         # from contaminating rolling windows (was 635 rows of oni_30d <= -90)
         oni_df = oni_df[oni_df['ANOM'] > -90].copy()
-
+       
         oni_daily         = oni_df.resample('D').asfreq()
         oni_daily['ANOM'] = oni_daily['ANOM'].interpolate(
             method='linear', limit_direction='both'
