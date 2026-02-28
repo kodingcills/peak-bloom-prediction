@@ -1,7 +1,26 @@
-.Rproj.user
-.Rhistory
-.RData
-.Ruserdata
-*.Rproj
-.env/
+# Python
+__pycache__/
+*.py[cod]
+*.so
+
+# Virtual environments
 venv/
+.env
+.env.*
+
+# MLflow
+mlruns/
+
+# Generated data artifacts
+data/silver/
+data/processed/
+data/gold/
+
+# Large binaries
+*.parquet
+*.nc
+*.pkl
+*.joblib
+
+# OS
+.DS_Store

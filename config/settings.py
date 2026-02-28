@@ -70,6 +70,10 @@ except ValueError:
     N_JOBS = 0
 
 
+# NOTE: era5_start is the ERA5-Land data start, NOT the label start.
+# ERA5-Land via Open-Meteo begins 1950-01-01. Labels may go further back
+# (DC to 1921, Liestal to 1894, Kyoto to 812) but features can only be
+# computed for years with weather data (>= 1950).
 SITES: dict[str, SiteConfig] = {
     "washingtondc": SiteConfig(
         name="Washington, D.C.",

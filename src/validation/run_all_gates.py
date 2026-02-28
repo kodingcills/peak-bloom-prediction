@@ -9,7 +9,6 @@ import sys
 import pandas as pd
 
 from config.settings import GOLD_DIR, PROCESSED_DIR, SILVER_WEATHER_DIR
-from src.monitoring import mlflow_utils
 from src.processing.labels import load_competition_labels
 from src.validation import gates
 
@@ -64,20 +63,15 @@ def main() -> None:
         gate_names = [name for names in PHASE_GATES.values() for name in names]
 
     results: list[tuple[str, str]] = []
-    with mlflow_utils.init_mlflow(run_name="validate_gates", tags={"phase": args.phase or "all"}):
-        mlflow_utils.log_params({"phase": args.phase or "all"})
+    for gate_name in gate_names:
         try:
-            for gate_name in gate_names:
-                try:
-                    _run_gate(gate_name)
-                    results.append((gate_name, "PASS"))
-                except Exception:
-                    results.append((gate_name, "FAIL"))
-                    raise
-        finally:
-            table = "\n".join(f"{name}: {status}" for name, status in results)
-            mlflow_utils.log_text(table, "gate_results.txt")
-            print(table)
+            _run_gate(gate_name)
+            results.append((gate_name, "PASS"))
+        except Exception:
+            results.append((gate_name, "FAIL"))
+            break
+    table = "\n".join(f"{name}: {status}" for name, status in results)
+    print(table)
 
     if any(status == "FAIL" for _, status in results):
         sys.exit(1)

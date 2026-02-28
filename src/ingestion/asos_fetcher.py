@@ -51,15 +51,16 @@ def fetch_asos_station(
     logger.info("Fetching ASOS station %s", station_id)
     response = requests.get(ASOS_ENDPOINT, params=params, timeout=120)
     response.raise_for_status()
-    df = pd.read_csv(StringIO(response.text))
+    df = pd.read_csv(StringIO(response.text), low_memory=False)
 
     if "valid" not in df.columns:
         raise ValueError(f"ASOS response missing 'valid' column for {station_id}")
 
-    df = df.replace("M", pd.NA)
-    df["temperature_2m"] = pd.to_numeric(df["tmpf"], errors="coerce")
-    df = df.dropna(subset=["temperature_2m"])
-    df["temperature_2m"] = (df["temperature_2m"] - 32.0) * 5.0 / 9.0
+    df = df.replace({"M": pd.NA, "T": pd.NA})
+    for col in ["tmpf", "dwpf", "relh"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    df["temperature_2m"] = (df["tmpf"] - 32.0) * 5.0 / 9.0
     df = df.rename(columns={"valid": "timestamp"})
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
     df = df.sort_values("timestamp")

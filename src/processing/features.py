@@ -81,12 +81,24 @@ def build_gold_features(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     records: list[dict] = []
+    total_pairs = len(labels_df.groupby(["site_key", "year"]))
+    skipped = 0
+
     for (site_key, year), _ in labels_df.groupby(["site_key", "year"]):
         weather_path = weather_root / site_key / f"{site_key}_consolidated.parquet"
         if not weather_path.exists():
             raise FileNotFoundError(f"Missing weather data for {site_key}")
         hourly = pd.read_parquet(weather_path)
         hourly["timestamp"] = pd.to_datetime(hourly["timestamp"], utc=True)
+        available_years = set(hourly["timestamp"].dt.year.unique().tolist())
+        if int(year) not in available_years:
+            logger.warning(
+                "Skipping %s %s: weather data not available for year",
+                site_key,
+                int(year),
+            )
+            skipped += 1
+            continue
         gdh = compute_gdh(hourly, int(year))
         cp = compute_chill_portions(hourly, int(year))
         bloom_doy = float(
@@ -107,8 +119,13 @@ def build_gold_features(
 
     for site_key in SITES.keys():
         weather_path = weather_root / site_key / f"{site_key}_consolidated.parquet"
+        if not weather_path.exists():
+            raise FileNotFoundError(f"Missing weather data for {site_key}")
         hourly = pd.read_parquet(weather_path)
         hourly["timestamp"] = pd.to_datetime(hourly["timestamp"], utc=True)
+        available_years = set(hourly["timestamp"].dt.year.unique().tolist())
+        if COMPETITION_YEAR not in available_years:
+            raise FileNotFoundError(f"Missing {COMPETITION_YEAR} weather data for {site_key}")
         gdh = compute_gdh(hourly, COMPETITION_YEAR)
         cp = compute_chill_portions(hourly, COMPETITION_YEAR)
         records.append(
@@ -120,6 +137,13 @@ def build_gold_features(
                 "bloom_doy": None,
             }
         )
+
+    logger.info(
+        "Built features for %s of %s site-years (%s skipped due to missing weather data)",
+        len(records),
+        total_pairs + len(SITES),
+        skipped,
+    )
 
     features = pd.DataFrame.from_records(records)
     features = features.sort_values(["site_key", "year"])

@@ -20,7 +20,6 @@ from config.settings import (
 from src.ingestion.asos_fetcher import fetch_all_asos
 from src.ingestion.era5_fetcher import fetch_all_era5
 from src.ingestion.seas5_fetcher import fetch_seas5
-from src.monitoring import mlflow_utils
 from src.processing.features import build_gold_features
 from src.processing.labels import load_competition_labels
 from src.validation import gates
@@ -61,150 +60,96 @@ def main() -> None:
 
     summary = {}
 
-    with mlflow_utils.init_mlflow(
-        run_name="phase1_refresh_data",
-        tags={"phase": "1"},
-    ):
-        mlflow_utils.log_params(
-            {
-                "force": args.force,
-                "sites": ",".join(sites),
-                "step": args.step or "all",
-                "chunk_years": 10,
-            }
+    labels_df: pd.DataFrame | None = None
+
+    if "era5" in steps:
+        start = time.perf_counter()
+        logger.info("Starting ERA5-Land fetch")
+        result = fetch_all_era5(
+            output_dir=SILVER_WEATHER_DIR, force=args.force, site_keys=sites
         )
+        duration = time.perf_counter() - start
+        summary["era5"] = result
+        logger.info("ERA5-Land fetch complete in %.1fs", duration)
 
-        labels_df: pd.DataFrame | None = None
+    if "asos" in steps:
+        start = time.perf_counter()
+        logger.info("Starting ASOS fetch")
+        result = fetch_all_asos(
+            output_dir=SILVER_ASOS_DIR, force=args.force, site_keys=sites
+        )
+        duration = time.perf_counter() - start
+        summary["asos"] = result
+        logger.info("ASOS fetch complete in %.1fs", duration)
 
-        if "era5" in steps:
-            with mlflow_utils._require_mlflow().start_run(
-                run_name="phase1_era5", nested=True
-            ):
-                start = time.perf_counter()
-                logger.info("Starting ERA5-Land fetch")
-                result = fetch_all_era5(
-                    output_dir=SILVER_WEATHER_DIR, force=args.force, site_keys=sites
-                )
-                duration = time.perf_counter() - start
-                ok_count = sum(1 for v in result.values() if v.get("ok"))
-                fail_count = sum(1 for v in result.values() if not v.get("ok"))
-                summary["era5"] = result
-                mlflow_utils.log_metrics(
-                    {
-                        "duration_seconds": duration,
-                        "sites_ok": ok_count,
-                        "sites_failed": fail_count,
-                    }
-                )
-                logger.info("ERA5-Land fetch complete")
+    if "seas5" in steps:
+        start = time.perf_counter()
+        logger.info("Starting SEAS5 fetch")
+        result = fetch_seas5(
+            output_path=PROCESSED_DIR / "seas5_2026.nc", force=args.force
+        )
+        duration = time.perf_counter() - start
+        summary["seas5"] = {"path": str(result) if result else None}
+        logger.info("SEAS5 fetch complete in %.1fs", duration)
 
-        if "asos" in steps:
-            with mlflow_utils._require_mlflow().start_run(
-                run_name="phase1_asos", nested=True
-            ):
-                start = time.perf_counter()
-                logger.info("Starting ASOS fetch")
-                result = fetch_all_asos(
-                    output_dir=SILVER_ASOS_DIR, force=args.force, site_keys=sites
-                )
-                duration = time.perf_counter() - start
-                ok_count = sum(1 for v in result.values() if v.get("ok"))
-                fail_count = sum(1 for v in result.values() if not v.get("ok"))
-                summary["asos"] = result
-                mlflow_utils.log_metrics(
-                    {
-                        "duration_seconds": duration,
-                        "stations_ok": ok_count,
-                        "stations_failed": fail_count,
-                    }
-                )
-                logger.info("ASOS fetch complete")
+    if "labels" in steps:
+        start = time.perf_counter()
+        logger.info("Loading competition labels")
+        labels_df = load_competition_labels()
+        duration = time.perf_counter() - start
+        summary["labels"] = {"rows": len(labels_df)}
+        logger.info("Labels loaded: %s rows (%.1fs)", len(labels_df), duration)
 
-        if "seas5" in steps:
-            with mlflow_utils._require_mlflow().start_run(
-                run_name="phase1_seas5", nested=True
-            ):
-                start = time.perf_counter()
-                logger.info("Starting SEAS5 fetch")
-                result = fetch_seas5(
-                    output_path=PROCESSED_DIR / "seas5_2026.nc", force=args.force
-                )
-                duration = time.perf_counter() - start
-                summary["seas5"] = {"path": str(result) if result else None}
-                mlflow_utils.log_metrics({"duration_seconds": duration})
-                if result:
-                    mlflow_utils.log_artifact(result)
-                else:
-                    flag = PROCESSED_DIR / "SEAS5_FETCH_FAILED"
-                    if flag.exists():
-                        mlflow_utils.log_artifact(flag)
-                logger.info("SEAS5 fetch complete")
-
-        if "labels" in steps:
-            with mlflow_utils._require_mlflow().start_run(
-                run_name="phase1_labels", nested=True
-            ):
-                start = time.perf_counter()
-                logger.info("Loading competition labels")
+    if "features" in steps:
+        start = time.perf_counter()
+        logger.info("Building gold features")
+        features_path = GOLD_DIR / "features.parquet"
+        if features_path.exists() and not args.force:
+            logger.info("Skipping existing gold features: %s", features_path)
+        else:
+            if labels_df is None:
                 labels_df = load_competition_labels()
-                duration = time.perf_counter() - start
-                summary["labels"] = {"rows": len(labels_df)}
-                mlflow_utils.log_metrics({"duration_seconds": duration, "rows": len(labels_df)})
-                logger.info("Labels loaded: %s rows", len(labels_df))
+            features_df = build_gold_features(
+                SILVER_WEATHER_DIR, labels_df, features_path
+            )
+            summary["features"] = {"rows": len(features_df)}
+            logger.info("Gold features built: %s rows", len(features_df))
+        duration = time.perf_counter() - start
+        logger.info("Gold features step complete in %.1fs", duration)
 
-        if "features" in steps:
-            with mlflow_utils._require_mlflow().start_run(
-                run_name="phase1_features", nested=True
-            ):
-                start = time.perf_counter()
-                logger.info("Building gold features")
-                features_path = GOLD_DIR / "features.parquet"
-                if features_path.exists() and not args.force:
-                    logger.info("Skipping existing gold features: %s", features_path)
-                else:
-                    if labels_df is None:
-                        labels_df = load_competition_labels()
-                    features_df = build_gold_features(
-                        SILVER_WEATHER_DIR, labels_df, features_path
-                    )
-                    summary["features"] = {"rows": len(features_df)}
-                    mlflow_utils.log_metrics({"rows": len(features_df)})
-                    mlflow_utils.log_artifact(features_path)
-                    logger.info("Gold features built: %s rows", len(features_df))
-                duration = time.perf_counter() - start
-                mlflow_utils.log_metrics({"duration_seconds": duration})
+    logger.info("Running validation gates")
+    if labels_df is None and (GOLD_DIR / "features.parquet").exists():
+        labels_df = load_competition_labels()
 
-        logger.info("Running validation gates")
-        gate_results: list[tuple[str, str]] = []
-        try:
-            if labels_df is None and (GOLD_DIR / "features.parquet").exists():
-                labels_df = load_competition_labels()
-            gates.assert_inference_cutoff_utc(SILVER_WEATHER_DIR)
-            gate_results.append(("assert_inference_cutoff_utc", "PASS"))
-            if (GOLD_DIR / "features.parquet").exists():
-                features_df = pd.read_parquet(GOLD_DIR / "features.parquet")
-                gates.assert_historical_window_end(features_df)
-                gate_results.append(("assert_historical_window_end", "PASS"))
-                gates.assert_gold_schema(features_df)
-                gate_results.append(("assert_gold_schema", "PASS"))
-            if labels_df is not None:
-                gates.assert_labels_complete(labels_df)
-                gate_results.append(("assert_labels_complete", "PASS"))
-            gates.assert_silver_utc(SILVER_WEATHER_DIR)
-            gate_results.append(("assert_silver_utc", "PASS"))
-            gates.assert_seas5_members(PROCESSED_DIR / "seas5_2026.nc")
-            gate_results.append(("assert_seas5_members", "PASS"))
-        except Exception as exc:
-            gate_results.append((type(exc).__name__, "FAIL"))
-            table = "\n".join(f"{name}: {status}" for name, status in gate_results)
-            mlflow_utils.log_text(table, "phase1_gate_results.txt")
-            raise
+    weather_files = list(SILVER_WEATHER_DIR.rglob("*.parquet"))
+    gold_path = GOLD_DIR / "features.parquet"
+    seas5_path = PROCESSED_DIR / "seas5_2026.nc"
 
-        table = "\n".join(f"{name}: {status}" for name, status in gate_results)
-        mlflow_utils.log_text(table, "phase1_gate_results.txt")
-        logger.info("Validation gates complete")
+    if weather_files:
+        gates.assert_inference_cutoff_utc(SILVER_WEATHER_DIR)
+        gates.assert_silver_utc(SILVER_WEATHER_DIR)
+    else:
+        logger.info("Skipping weather gates; no silver weather files present")
 
-        logger.info("Phase 1 summary: %s", summary)
+    if gold_path.exists():
+        features_df = pd.read_parquet(gold_path)
+        gates.assert_historical_window_end(features_df)
+        gates.assert_gold_schema(features_df)
+    else:
+        logger.info("Skipping gold feature gates; no gold features present")
+
+    if labels_df is not None:
+        gates.assert_labels_complete(labels_df)
+    else:
+        logger.info("Skipping labels gate; labels not loaded")
+
+    if seas5_path.exists():
+        gates.assert_seas5_members(seas5_path)
+    else:
+        logger.info("Skipping SEAS5 gate; NetCDF missing")
+
+    logger.info("Validation gates complete")
+    logger.info("Phase 1 summary: %s", summary)
 
 
 if __name__ == "__main__":

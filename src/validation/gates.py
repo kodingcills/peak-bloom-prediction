@@ -65,7 +65,7 @@ def assert_historical_window_end(features_df: pd.DataFrame) -> None:
 def assert_labels_complete(labels_df: pd.DataFrame | None = None) -> None:
     """All 5 competition sites present. Max year >= 2024 for each."""
 
-    labels = labels_df or load_competition_labels(RAW_GMU_DIR)
+    labels = labels_df if labels_df is not None else load_competition_labels(RAW_GMU_DIR)
     sites = set(labels["site_key"].unique())
     if sites != set(SITES.keys()):
         raise AssertionError(f"Missing sites in labels: {set(SITES.keys()) - sites}")
@@ -139,7 +139,6 @@ def assert_requirements_present(requirements_path: Path | None = None) -> None:
         "netcdf4>=1.6",
         "cdsapi>=0.6",
         "jupyter>=1.0",
-        "mlflow>=2.0",
     ]
     path = requirements_path or Path("requirements.txt")
     if not path.exists():
