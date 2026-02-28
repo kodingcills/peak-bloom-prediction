@@ -30,8 +30,10 @@ def fetch_seas5(output_path: Path | None = None, force: bool = False) -> Path | 
         logger.info("Skipping existing SEAS5 file: %s", output_path)
         return output_path
 
+    flag_path = output_path.parent / "SEAS5_FETCH_FAILED"
     if SEAS5_FALLBACK_MODE:
         logger.warning("SEAS5_FALLBACK_MODE is true; skipping SEAS5 download")
+        flag_path.write_text("SEAS5 fetch skipped due to SEAS5_FALLBACK_MODE\n")
         return None
 
     import cdsapi  # local import to avoid dependency when offline
@@ -61,7 +63,6 @@ def fetch_seas5(output_path: Path | None = None, force: bool = False) -> Path | 
         except Exception as exc:  # pragma: no cover - external dependency
             logger.exception("SEAS5 fetch failed: %s", exc)
             if attempt == 3:
-                flag_path = output_path.parent / "SEAS5_FETCH_FAILED"
                 flag_path.write_text("SEAS5 fetch failed after 3 attempts\n")
                 return None
             time.sleep([1, 5, 15][attempt - 1])
@@ -70,4 +71,6 @@ def fetch_seas5(output_path: Path | None = None, force: bool = False) -> Path | 
     members = _count_members(dataset)
     if members != 50:
         raise AssertionError(f"SEAS5 ensemble members expected 50, got {members}")
+    if flag_path.exists():
+        flag_path.unlink()
     return output_path

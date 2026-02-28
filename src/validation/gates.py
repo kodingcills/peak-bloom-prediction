@@ -78,19 +78,20 @@ def assert_labels_complete(labels_df: pd.DataFrame | None = None) -> None:
 def assert_seas5_members(nc_path: Path | None = None) -> None:
     """SEAS5 NetCDF contains exactly 50 unique ensemble members."""
 
-    if SEAS5_FALLBACK_MODE:
-        logger.warning("Skipping SEAS5 member check due to fallback mode")
-        return
+    flag_path = PROCESSED_DIR / "SEAS5_FETCH_FAILED"
     path = nc_path or (PROCESSED_DIR / "seas5_2026.nc")
-    if not path.exists():
-        raise AssertionError("SEAS5 NetCDF missing")
-    dataset = xr.open_dataset(path)
-    for dim in ("number", "member", "ensemble"):
-        if dim in dataset.dims:
-            if int(dataset.dims[dim]) != 50:
-                raise AssertionError(f"SEAS5 members expected 50, got {dataset.dims[dim]}")
-            return
-    raise AssertionError("TODO: AUDIT — Unable to find SEAS5 ensemble dimension")
+    if path.exists():
+        dataset = xr.open_dataset(path)
+        for dim in ("number", "member", "ensemble"):
+            if dim in dataset.dims:
+                if int(dataset.dims[dim]) != 50:
+                    raise AssertionError(f"SEAS5 members expected 50, got {dataset.dims[dim]}")
+                return
+        raise AssertionError("TODO: AUDIT — Unable to find SEAS5 ensemble dimension")
+    if flag_path.exists():
+        logger.warning("Skipping SEAS5 member check due to SEAS5_FETCH_FAILED flag")
+        return
+    raise AssertionError("SEAS5 NetCDF missing and fallback flag not set")
 
 
 def assert_silver_utc(weather_dir: Path | None = None) -> None:

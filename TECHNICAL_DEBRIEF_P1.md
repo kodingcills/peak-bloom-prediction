@@ -139,3 +139,39 @@ Evidence: `src/ingestion/asos_fetcher.py` changes; audit output shows missing st
 | assert_seas5_members | NOT RUN | fallback not invoked yet |
 | assert_silver_utc | NOT RUN | gates pending |
 | assert_gold_schema | NOT RUN | features missing |
+
+
+## Addendum — Final Phase 1 Gates + Artifacts (2026-02-28)
+
+### Gate Results (Phase 1)
+| Gate | Result | Evidence |
+|------|--------|----------|
+| assert_inference_cutoff_utc | PASS | `source venv/bin/activate && python3 -m src.validation.run_all_gates --phase 1` |
+| assert_historical_window_end | PASS | `source venv/bin/activate && python3 -m src.validation.run_all_gates --phase 1` |
+| assert_labels_complete | PASS | `source venv/bin/activate && python3 -m src.validation.run_all_gates --phase 1` |
+| assert_seas5_members | FAIL | `source venv/bin/activate && python3 -m src.validation.run_all_gates --phase 1` → `assert_seas5_members: FAIL` |
+| assert_silver_utc | PASS | `source venv/bin/activate && python3 -m src.validation.run_all_gates --phase 1` |
+| assert_gold_schema | PASS | `source venv/bin/activate && python3 -m src.validation.run_all_gates --phase 1` |
+
+Note: `assert_seas5_members` failed because fallback was not detected in the gate run (no `SEAS5_FALLBACK_MODE=true` env and no `data/processed/SEAS5_FETCH_FAILED` flag). Rerun with fallback env or flag to allow the gate to skip.
+
+### Artifact Inventory (Current)
+| Artifact | Path | Exists | Size | Notes |
+|----------|------|--------|------|-------|
+| ERA5 (washingtondc) | data/silver/weather/washingtondc/washingtondc_consolidated.parquet | YES | 6.9M | `ls -lh ...` |
+| ERA5 (kyoto) | data/silver/weather/kyoto/kyoto_consolidated.parquet | YES | 6.9M | `ls -lh ...` |
+| ERA5 (liestal) | data/silver/weather/liestal/liestal_consolidated.parquet | YES | 6.9M | `ls -lh ...` |
+| ERA5 (vancouver) | data/silver/weather/vancouver/vancouver_consolidated.parquet | YES | 6.9M | `ls -lh ...` |
+| ERA5 (nyc) | data/silver/weather/nyc/nyc_consolidated.parquet | YES | 6.9M | `ls -lh ...` |
+| ASOS (CYVR) | data/silver/asos/CYVR.parquet | YES | 2.7M | `ls -lh ...` |
+| ASOS (DCA) | data/silver/asos/DCA.parquet | YES | 2.7M | `ls -lh ...` |
+| ASOS (IAD) | data/silver/asos/IAD.parquet | YES | 2.8M | `ls -lh ...` |
+| ASOS (JFK) | data/silver/asos/JFK.parquet | YES | 2.7M | `ls -lh ...` |
+| ASOS (LGA) | data/silver/asos/LGA.parquet | YES | 2.8M | `ls -lh ...` |
+| Gold features | data/gold/features.parquet | YES | 7.4K | `ls -lh ...` |
+
+### Gold Features Diagnostic (Current)
+Evidence: `source venv/bin/activate && python3 -c "import pandas as pd; ..."`
+- Shape: (239, 5)
+- Per-site years: kyoto 1950–2026 (77), liestal 1950–2026 (77), washingtondc 1950–2026 (77), vancouver 2022–2026 (5), nyc 2024–2026 (3)
+- 2026 rows present for all 5 sites; `bloom_doy` nulls = 5

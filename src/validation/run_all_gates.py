@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
+from pathlib import Path
 
 import pandas as pd
-
-from config.settings import GOLD_DIR, PROCESSED_DIR, SILVER_WEATHER_DIR
-from src.processing.labels import load_competition_labels
-from src.validation import gates
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +25,23 @@ PHASE_GATES = {
 }
 
 
+def _load_dotenv(dotenv_path: Path) -> None:
+    if not dotenv_path.exists():
+        return
+    for line in dotenv_path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
 def _run_gate(name: str) -> None:
     logger.info("Running gate: %s", name)
+    from config.settings import GOLD_DIR, PROCESSED_DIR, SILVER_WEATHER_DIR
+    from src.processing.labels import load_competition_labels
+    from src.validation import gates
     fn = getattr(gates, name)
     if name == "assert_labels_complete":
         labels = load_competition_labels()
@@ -50,6 +63,8 @@ def _run_gate(name: str) -> None:
 
 
 def main() -> None:
+    _load_dotenv(Path(".env"))
+
     parser = argparse.ArgumentParser(description="Run Phenology Engine validation gates.")
     parser.add_argument("--phase", help="Optional phase number to run gates for.")
     args = parser.parse_args()

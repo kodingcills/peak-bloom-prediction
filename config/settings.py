@@ -55,7 +55,23 @@ ASOS_ENDPOINT = "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py"
 
 # Operational settings
 # TODO: AUDIT — confirm desired Open-Meteo inter-chunk delay.
-OPENMETEO_DELAY_SECONDS = float(os.getenv("OPENMETEO_DELAY_SECONDS", "1.0"))
+OPENMETEO_DELAY_SECONDS = float(os.getenv("OPENMETEO_DELAY_SECONDS", "1.5"))
+try:
+    OPENMETEO_MAX_ATTEMPTS = int(os.getenv("OPENMETEO_MAX_ATTEMPTS", "3"))
+except ValueError:
+    OPENMETEO_MAX_ATTEMPTS = 3
+try:
+    OPENMETEO_429_MIN_SLEEP_SECONDS = int(
+        os.getenv("OPENMETEO_429_MIN_SLEEP_SECONDS", "30")
+    )
+except ValueError:
+    OPENMETEO_429_MIN_SLEEP_SECONDS = 30
+try:
+    OPENMETEO_429_MAX_SLEEP_SECONDS = int(
+        os.getenv("OPENMETEO_429_MAX_SLEEP_SECONDS", "180")
+    )
+except ValueError:
+    OPENMETEO_429_MAX_SLEEP_SECONDS = 180
 
 
 def _env_flag(name: str, default: str = "false") -> bool:

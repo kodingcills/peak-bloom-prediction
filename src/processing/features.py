@@ -91,6 +91,7 @@ def build_gold_features(
         hourly = pd.read_parquet(weather_path)
         hourly["timestamp"] = pd.to_datetime(hourly["timestamp"], utc=True)
         available_years = set(hourly["timestamp"].dt.year.unique().tolist())
+        # ERA5-Land starts in 1950; pre-1950 label years are skipped due to no weather data.
         if int(year) not in available_years:
             logger.warning(
                 "Skipping %s %s: weather data not available for year",

@@ -40,7 +40,8 @@ def load_competition_labels(raw_dir: Path | None = None) -> pd.DataFrame:
         frames.append(pd.read_csv(path))
 
     labels = pd.concat(frames, ignore_index=True)
-    # Pre-1677 dates exceed pandas ns timestamp range. bloom_doy is authoritative. See IMPLEMENTATION_STATE blocker 1.
+    # Pre-1677 dates exceed pandas ns timestamp range, so bloom_date stays string and
+    # bloom_doy is authoritative for those years (datetime validation skipped).
     labels["bloom_date"] = labels["bloom_date"].astype(str)
     labels["bloom_doy"] = pd.to_numeric(labels["bloom_doy"], errors="raise")
     if (labels["bloom_doy"] % 1 != 0).any():
