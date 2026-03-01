@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -22,6 +23,20 @@ PHASE_GATES = {
         "assert_silver_utc",
         "assert_gold_schema",
     ],
+    "2": [
+        "assert_bias_fold_safe",
+        "assert_window_safe",
+        "assert_precision_fold_safe",
+        "assert_vancouver_weight_stable",
+        "assert_cv_no_leakage",
+    ],
+    "3": [
+        "assert_gmm_k_range",
+        "assert_no_noise_injection",
+        "assert_submission_schema",
+        "assert_predictions_reasonable",
+        "assert_shrinkage_applied",
+    ],
 }
 
 
@@ -39,7 +54,7 @@ def _load_dotenv(dotenv_path: Path) -> None:
 
 def _run_gate(name: str) -> None:
     logger.info("Running gate: %s", name)
-    from config.settings import GOLD_DIR, PROCESSED_DIR, SILVER_WEATHER_DIR
+    from config.settings import COMPETITION_YEAR, GOLD_DIR, PROCESSED_DIR, SILVER_WEATHER_DIR
     from src.processing.labels import load_competition_labels
     from src.validation import gates
     fn = getattr(gates, name)
@@ -58,6 +73,45 @@ def _run_gate(name: str) -> None:
         fn(SILVER_WEATHER_DIR)
     elif name == "assert_seas5_members":
         fn(PROCESSED_DIR / "seas5_2026.nc")
+    elif name == "assert_bias_fold_safe":
+        fold_log = json.loads((PROCESSED_DIR / "fold_log.json").read_text())
+        fn(fold_log)
+    elif name == "assert_window_safe":
+        fold_log = json.loads((PROCESSED_DIR / "fold_log.json").read_text())
+        fn(fold_log)
+    elif name == "assert_precision_fold_safe":
+        cv_results = pd.read_parquet(PROCESSED_DIR / "cv_results.parquet")
+        fn(cv_results)
+    elif name == "assert_vancouver_weight_stable":
+        shrinkage = json.loads((PROCESSED_DIR / "shrinkage_weights.json").read_text())
+        cv_results = pd.read_parquet(PROCESSED_DIR / "cv_results.parquet")
+        training_df = pd.read_parquet(GOLD_DIR / "features.parquet")
+        training_df = training_df.loc[
+            (training_df["year"] != COMPETITION_YEAR) & training_df["bloom_doy"].notna()
+        ].copy()
+        epsilon = float(shrinkage.get("epsilon", 1.0))
+        fn(shrinkage, cv_results, training_df, epsilon)
+    elif name == "assert_cv_no_leakage":
+        cv_results = pd.read_parquet(PROCESSED_DIR / "cv_results.parquet")
+        fold_log = json.loads((PROCESSED_DIR / "fold_log.json").read_text())
+        fn(cv_results, fold_log)
+    elif name == "assert_gmm_k_range":
+        gmm = json.loads((PROCESSED_DIR / "diagnostics" / "gmm_results.json").read_text())
+        fn(gmm)
+    elif name == "assert_no_noise_injection":
+        ens = json.loads(
+            (PROCESSED_DIR / "diagnostics" / "ensemble_distributions.json").read_text()
+        )
+        fn(ens)
+    elif name == "assert_submission_schema":
+        fn(Path("submission.csv"))
+    elif name == "assert_predictions_reasonable":
+        fn(Path("submission.csv"))
+    elif name == "assert_shrinkage_applied":
+        summary = json.loads(
+            (PROCESSED_DIR / "diagnostics" / "prediction_summary.json").read_text()
+        )
+        fn(summary)
     else:
         fn()
 

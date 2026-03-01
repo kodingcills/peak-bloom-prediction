@@ -24,3 +24,5 @@ data/gold/
 
 # OS
 .DS_Store
+
+*.md
