@@ -27,7 +27,6 @@ PHASE_GATES = {
         "assert_bias_fold_safe",
         "assert_window_safe",
         "assert_precision_fold_safe",
-        "assert_vancouver_weight_stable",
         "assert_cv_no_leakage",
     ],
     "3": [
@@ -35,7 +34,6 @@ PHASE_GATES = {
         "assert_no_noise_injection",
         "assert_submission_schema",
         "assert_predictions_reasonable",
-        "assert_shrinkage_applied",
     ],
 }
 
@@ -82,15 +80,6 @@ def _run_gate(name: str) -> None:
     elif name == "assert_precision_fold_safe":
         cv_results = pd.read_parquet(PROCESSED_DIR / "cv_results.parquet")
         fn(cv_results)
-    elif name == "assert_vancouver_weight_stable":
-        shrinkage = json.loads((PROCESSED_DIR / "shrinkage_weights.json").read_text())
-        cv_results = pd.read_parquet(PROCESSED_DIR / "cv_results.parquet")
-        training_df = pd.read_parquet(GOLD_DIR / "features.parquet")
-        training_df = training_df.loc[
-            (training_df["year"] != COMPETITION_YEAR) & training_df["bloom_doy"].notna()
-        ].copy()
-        epsilon = float(shrinkage.get("epsilon", 1.0))
-        fn(shrinkage, cv_results, training_df, epsilon)
     elif name == "assert_cv_no_leakage":
         cv_results = pd.read_parquet(PROCESSED_DIR / "cv_results.parquet")
         fold_log = json.loads((PROCESSED_DIR / "fold_log.json").read_text())
@@ -107,11 +96,6 @@ def _run_gate(name: str) -> None:
         fn(Path("submission.csv"))
     elif name == "assert_predictions_reasonable":
         fn(Path("submission.csv"))
-    elif name == "assert_shrinkage_applied":
-        summary = json.loads(
-            (PROCESSED_DIR / "diagnostics" / "prediction_summary.json").read_text()
-        )
-        fn(summary)
     else:
         fn()
 

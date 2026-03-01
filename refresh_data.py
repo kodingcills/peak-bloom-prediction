@@ -49,19 +49,22 @@ def _validate_era5_inputs(
     failures: list[dict[str, str]] = []
     for site_key in required_sites:
         site_dir = weather_root / site_key
-        consolidated = site_dir / f"{site_key}_consolidated.parquet"
+        hourly_consolidated = site_dir / f"{site_key}_hourly_consolidated.parquet"
+        daily_consolidated = site_dir / f"{site_key}_daily_consolidated.parquet"
         incomplete = site_dir / "_INCOMPLETE.txt"
         site_status = status.get(site_key, {})
         if (
             not site_status.get("ok", False)
-            or not consolidated.exists()
+            or not hourly_consolidated.exists()
+            or not daily_consolidated.exists()
             or incomplete.exists()
         ):
             failures.append(
                 {
                     "site": site_key,
                     "status_error": str(site_status.get("error", "")),
-                    "consolidated_exists": str(consolidated.exists()),
+                    "hourly_consolidated_exists": str(hourly_consolidated.exists()),
+                    "daily_consolidated_exists": str(daily_consolidated.exists()),
                     "incomplete_marker": str(incomplete.exists()),
                 }
             )
@@ -147,10 +150,11 @@ def main() -> None:
             logger.error("ERA5 completeness check failed for required sites:")
             for failure in era5_failures:
                 logger.error(
-                    "site=%s error=%s consolidated_exists=%s incomplete_marker=%s",
+                    "site=%s error=%s hourly_consolidated_exists=%s daily_consolidated_exists=%s incomplete_marker=%s",
                     failure["site"],
                     failure["status_error"],
-                    failure["consolidated_exists"],
+                    failure["hourly_consolidated_exists"],
+                    failure["daily_consolidated_exists"],
                     failure["incomplete_marker"],
                 )
             logger.error("ERA5 ingestion incomplete. Aborting Phase 1 before downstream steps.")

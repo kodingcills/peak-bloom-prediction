@@ -402,9 +402,14 @@ class SYHCrossValidator:
         beta_cp = float(coef[len(self.site_order) + 1])
         beta_wv = float(coef[len(self.site_order) + 2])
 
-        gdh_std = float(frame["gdh"].astype(float).std(ddof=1))
-        cp_std = float(frame["cp"].astype(float).std(ddof=1))
-        wv_std = float(frame["wv"].astype(float).std(ddof=1))
+        gdh_std = float(pd.to_numeric(frame["gdh"], errors="coerce").astype(float).std(ddof=1))
+        cp_std = float(pd.to_numeric(frame["cp"], errors="coerce").astype(float).std(ddof=1))
+        wv_std = float(pd.to_numeric(frame["wv"], errors="coerce").astype(float).std(ddof=1))
+        if np.isnan(gdh_std) or np.isnan(cp_std) or np.isnan(wv_std):
+            raise AssertionError(
+                "Full-data feature standard deviation is NaN after imputation; "
+                "expected finite std values for gdh/cp/wv."
+            )
 
         feature_scales_full = {
             "gdh_std": gdh_std,

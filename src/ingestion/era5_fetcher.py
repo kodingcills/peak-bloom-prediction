@@ -149,15 +149,22 @@ def fetch_era5_site(
     site_dir.mkdir(parents=True, exist_ok=True)
     incomplete_path = site_dir / "_INCOMPLETE.txt"
 
-    chunk_paths: list[Path] = []
+    hourly_chunk_paths: list[Path] = []
+    daily_chunk_paths: list[Path] = []
     for start_year, end_year in _iter_year_chunks(site_config.era5_start):
         end_date = _chunk_end_date(end_year)
         start_date = date(start_year, 1, 1)
-        chunk_path = site_dir / f"{site_key}_{start_year}_{end_year}.parquet"
-        chunk_paths.append(chunk_path)
+        hourly_chunk_path = site_dir / f"{site_key}_{start_year}_{end_year}_hourly.parquet"
+        daily_chunk_path = site_dir / f"{site_key}_{start_year}_{end_year}_daily.parquet"
+        hourly_chunk_paths.append(hourly_chunk_path)
+        daily_chunk_paths.append(daily_chunk_path)
 
-        if chunk_path.exists() and not force:
-            logger.info("Skipping existing ERA5 chunk: %s", chunk_path)
+        if hourly_chunk_path.exists() and daily_chunk_path.exists() and not force:
+            logger.info(
+                "Skipping existing ERA5 chunk pair: %s and %s",
+                hourly_chunk_path,
+                daily_chunk_path,
+            )
             continue
 
         params = {
@@ -166,6 +173,10 @@ def fetch_era5_site(
             "start_date": start_date.isoformat(),
             "end_date": end_date.isoformat(),
             "hourly": "temperature_2m,relative_humidity_2m,soil_temperature_0_to_7cm",
+            "daily": (
+                "temperature_2m_max,temperature_2m_min,temperature_2m_mean,"
+                "daylight_duration,precipitation_sum,rain_sum,snowfall_sum"
+            ),
             "timezone": "UTC",
         }
         logger.info(
@@ -183,12 +194,36 @@ def fetch_era5_site(
             raise
         if "hourly" not in payload:
             raise ValueError(f"Missing hourly data in response for {site_key}")
+        if "daily" not in payload:
+            raise ValueError(f"Missing daily data in response for {site_key}")
         hourly = payload["hourly"]
-        df = pd.DataFrame(hourly)
-        df = df.rename(columns={"time": "timestamp"})
-        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-        df = df.sort_values("timestamp")
-        df.to_parquet(chunk_path, index=False)
+        daily = payload["daily"]
+
+        hourly_df = pd.DataFrame(hourly)
+        hourly_df = hourly_df.rename(columns={"time": "timestamp"})
+        hourly_df["timestamp"] = pd.to_datetime(hourly_df["timestamp"], utc=True)
+        hourly_df = hourly_df.sort_values("timestamp")
+        hourly_df.to_parquet(hourly_chunk_path, index=False)
+
+        daily_df = pd.DataFrame(
+            {
+                "time": pd.to_datetime(daily["time"]),
+                "tmax": daily["temperature_2m_max"],
+                "tmin": daily["temperature_2m_min"],
+                "tmean": daily["temperature_2m_mean"],
+                "daylight": daily["daylight_duration"],
+                "precip": daily["precipitation_sum"],
+                "rain": daily["rain_sum"],
+                "snow": daily["snowfall_sum"],
+            }
+        )
+        if daily_df["time"].dt.tz is None:
+            daily_df["time"] = daily_df["time"].dt.tz_localize("UTC")
+        else:
+            daily_df["time"] = daily_df["time"].dt.tz_convert("UTC")
+        daily_df = daily_df.sort_values("time")
+        daily_df.to_parquet(daily_chunk_path, index=False)
+
         time.sleep(OPENMETEO_DELAY_SECONDS)
         if had_429:
             cooldown = OPENMETEO_DELAY_SECONDS * 2
@@ -202,25 +237,54 @@ def fetch_era5_site(
             time.sleep(cooldown)
 
     logger.info("Consolidating ERA5-Land chunks for %s", site_key)
-    frames = []
-    for path in chunk_paths:
+    hourly_frames = []
+    for path in hourly_chunk_paths:
         if not path.exists():
             continue
-        frames.append(pd.read_parquet(path))
-    if not frames:
-        raise FileNotFoundError(f"No ERA5 chunks found for {site_key}")
+        hourly_frames.append(pd.read_parquet(path))
+    daily_frames = []
+    for path in daily_chunk_paths:
+        if not path.exists():
+            continue
+        daily_frames.append(pd.read_parquet(path))
+    if not hourly_frames or not daily_frames:
+        raise FileNotFoundError(f"Missing ERA5 chunk set for {site_key}")
 
-    consolidated_path = site_dir / f"{site_key}_consolidated.parquet"
-    if consolidated_path.exists() and not force:
-        logger.info("Skipping existing consolidated ERA5 file: %s", consolidated_path)
-        if all(path.exists() for path in chunk_paths) and incomplete_path.exists():
+    hourly_consolidated_path = site_dir / f"{site_key}_hourly_consolidated.parquet"
+    daily_consolidated_path = site_dir / f"{site_key}_daily_consolidated.parquet"
+    if (
+        hourly_consolidated_path.exists()
+        and daily_consolidated_path.exists()
+        and not force
+    ):
+        logger.info(
+            "Skipping existing consolidated ERA5 files: %s and %s",
+            hourly_consolidated_path,
+            daily_consolidated_path,
+        )
+        if (
+            all(path.exists() for path in hourly_chunk_paths)
+            and all(path.exists() for path in daily_chunk_paths)
+            and incomplete_path.exists()
+        ):
             incomplete_path.unlink()
         return site_dir
 
-    consolidated = pd.concat(frames, ignore_index=True)
-    consolidated = consolidated.drop_duplicates(subset=["timestamp"]).sort_values("timestamp")
-    consolidated.to_parquet(consolidated_path, index=False)
-    if all(path.exists() for path in chunk_paths) and incomplete_path.exists():
+    hourly_consolidated = pd.concat(hourly_frames, ignore_index=True)
+    hourly_consolidated = hourly_consolidated.drop_duplicates(
+        subset=["timestamp"]
+    ).sort_values("timestamp")
+    hourly_consolidated.to_parquet(hourly_consolidated_path, index=False)
+
+    daily_consolidated = pd.concat(daily_frames, ignore_index=True)
+    daily_consolidated = daily_consolidated.drop_duplicates(subset=["time"]).sort_values("time")
+    daily_consolidated.to_parquet(daily_consolidated_path, index=False)
+
+    if (
+        all(path.exists() for path in hourly_chunk_paths)
+        and all(path.exists() for path in daily_chunk_paths)
+        and incomplete_path.exists()
+    ):
         incomplete_path.unlink()
     return site_dir
 

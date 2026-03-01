@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
+import os
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -12,6 +14,7 @@ import numpy as np
 import pandas as pd
 
 from config.settings import COMPETITION_YEAR, GOLD_DIR, PROCESSED_DIR, SEAS5_NEUTRAL_THRESHOLD, SITES
+from src.modeling.analog_shrinkage import compute_prior_mean
 from src.modeling.empirical_bayes import apply_shrinkage
 from src.modeling.gmm_selector import fit_bimodal
 from src.modeling.seas5_processor import build_fallback_ensemble, process_seas5_ensemble
@@ -75,10 +78,13 @@ def _build_prediction_chain(
     shrinkage_weights: dict[str, Any],
     mean_bloom_doy: dict[str, float],
     global_mean: float,
+    shrinkage_mode: str = "global",
 ) -> tuple[pd.DataFrame, dict[str, Any], dict[str, Any]]:
     records: list[dict[str, Any]] = []
     gmm_results: dict[str, Any] = {}
     prediction_summary: dict[str, Any] = {}
+    mu_selected_by_site: dict[str, float] = {}
+    weights_by_site: dict[str, float] = {}
 
     for site_key in sorted(SITES.keys()):
         ens = ensemble_results[site_key]
@@ -95,10 +101,23 @@ def _build_prediction_chain(
             neutral_threshold=float(SEAS5_NEUTRAL_THRESHOLD),
         )
         gmm_results[site_key] = gmm_result
+        mu_selected_by_site[site_key] = float(gmm_result["selected_mean"])
+        weights_by_site[site_key] = _resolve_weight(shrinkage_weights, site_key)
 
-        model_pred = float(gmm_result["selected_mean"])
-        w = _resolve_weight(shrinkage_weights, site_key)
-        shrunk = apply_shrinkage(model_pred, float(global_mean), w)
+    for site_key in sorted(SITES.keys()):
+        ens = ensemble_results[site_key]
+        preds = np.asarray(ens["predictions"], dtype=float)
+        model_pred = float(mu_selected_by_site[site_key])
+        w = float(weights_by_site[site_key])
+        prior_payload = compute_prior_mean(
+            site_key=site_key,
+            shrinkage_mode=shrinkage_mode,
+            global_mean=float(global_mean),
+            mean_bloom_doy=mean_bloom_doy,
+            mu_selected_by_site=mu_selected_by_site,
+        )
+        prior_mean = float(prior_payload["prior_mean"])
+        shrunk = apply_shrinkage(model_pred, prior_mean, w)
 
         final_doy = int(round(shrunk))
         final_doy = max(60, min(140, final_doy))
@@ -109,11 +128,18 @@ def _build_prediction_chain(
         final_date = datetime(COMPETITION_YEAR, 1, 1) + timedelta(days=final_doy - 1)
         prediction_summary[site_key] = {
             "ensemble_mean": float(np.mean(preds)),
-            "gmm_k": int(gmm_result["k"]),
+            "gmm_k": int(gmm_results[site_key]["k"]),
             "gmm_selected_mean": model_pred,
             "shrinkage_weight": w,
             "global_mean": float(global_mean),
             "shrunk_prediction": float(shrunk),
+            "shrinkage_mode": shrinkage_mode,
+            "prior_mean": prior_mean,
+            "prior_source": prior_payload["prior_source"],
+            "analog_site": prior_payload["analog_site"],
+            "delta_days": prior_payload["delta_days"],
+            "pre_shrinkage": model_pred,
+            "post_shrinkage": float(shrunk),
             "final_doy": final_doy,
             "final_date": final_date.strftime("%Y-%m-%d"),
         }
@@ -128,6 +154,7 @@ def generate_predictions(
     shrinkage_weights: dict[str, Any],
     mean_bloom_doy: dict[str, float],
     global_mean: float,
+    shrinkage_mode: str = "global",
 ) -> pd.DataFrame:
     """Generate final 5 bloom DOY predictions from ensemble results.
 
@@ -146,6 +173,7 @@ def generate_predictions(
         shrinkage_weights=shrinkage_weights,
         mean_bloom_doy=mean_bloom_doy,
         global_mean=global_mean,
+        shrinkage_mode=shrinkage_mode,
     )
     return predictions_df
 
@@ -236,8 +264,35 @@ def save_diagnostics(
     )
 
 
+def _resolve_shrinkage_mode(cli_mode: str) -> str:
+    """Resolve shrinkage mode from CLI arg with env override."""
+
+    env_mode = os.getenv("SHRINKAGE_MODE")
+    if env_mode:
+        mode = env_mode.strip().lower()
+    else:
+        mode = cli_mode.strip().lower()
+
+    if mode not in {"global", "analog"}:
+        raise ValueError(
+            f"Invalid shrinkage mode: {mode}. Expected one of ['global', 'analog']."
+        )
+    return mode
+
+
 def main() -> None:
     """Phase 3 entrypoint for fallback ensemble inference and submission."""
+
+    parser = argparse.ArgumentParser(description="Run Phase 3 predictor.")
+    parser.add_argument(
+        "--shrinkage-mode",
+        choices=["global", "analog"],
+        default="global",
+        help="Shrinkage prior mode (default: global).",
+    )
+    args = parser.parse_args()
+    shrinkage_mode = _resolve_shrinkage_mode(args.shrinkage_mode)
+    logger.info("shrinkage_mode=%s", shrinkage_mode)
 
     artifacts = _load_phase2_artifacts(PROCESSED_DIR)
     global_mean = float(artifacts["global_mean"]["global_mean"])
@@ -270,6 +325,7 @@ def main() -> None:
         shrinkage_weights=artifacts["shrinkage_weights"],
         mean_bloom_doy=artifacts["mean_bloom_doy"],
         global_mean=global_mean,
+        shrinkage_mode=shrinkage_mode,
     )
 
     submission_path = save_submission(predictions_df, path="submission.csv")

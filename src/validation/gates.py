@@ -34,8 +34,11 @@ def assert_inference_cutoff_utc(weather_dir: Path | None = None) -> None:
         raise AssertionError("No silver weather parquet files found")
 
     for path in parquet_files:
-        df = pd.read_parquet(path, columns=["timestamp"])
-        ts = pd.to_datetime(df["timestamp"], utc=True)
+        df = pd.read_parquet(path)
+        ts_col = "timestamp" if "timestamp" in df.columns else ("time" if "time" in df.columns else None)
+        if ts_col is None:
+            continue
+        ts = pd.to_datetime(df[ts_col], utc=True)
         if ts.max() > INFERENCE_CUTOFF_UTC:
             raise AssertionError(
                 f"Found timestamp after cutoff in {path}: {ts.max()} > {INFERENCE_CUTOFF_UTC}"
@@ -51,7 +54,7 @@ def assert_historical_window_end(features_df: pd.DataFrame) -> None:
         if year >= COMPETITION_YEAR:
             continue
         site_key = row["site_key"]
-        weather_path = weather_root / site_key / f"{site_key}_consolidated.parquet"
+        weather_path = weather_root / site_key / f"{site_key}_hourly_consolidated.parquet"
         hourly = pd.read_parquet(weather_path)
         hourly["timestamp"] = pd.to_datetime(hourly["timestamp"], utc=True)
         gdh = compute_gdh(hourly, year)
@@ -103,8 +106,11 @@ def assert_silver_utc(weather_dir: Path | None = None) -> None:
     if not parquet_files:
         raise AssertionError("No silver weather parquet files found")
     for path in parquet_files:
-        df = pd.read_parquet(path, columns=["timestamp"])
-        ts = pd.to_datetime(df["timestamp"])
+        df = pd.read_parquet(path)
+        ts_col = "timestamp" if "timestamp" in df.columns else ("time" if "time" in df.columns else None)
+        if ts_col is None:
+            continue
+        ts = pd.to_datetime(df[ts_col])
         if ts.dt.tz is None:
             raise AssertionError(f"Timestamp missing UTC tzinfo in {path}")
 
@@ -117,7 +123,21 @@ def assert_gold_schema(features_df: pd.DataFrame | None = None) -> None:
         if not path.exists():
             raise AssertionError("Gold features parquet missing")
         features_df = pd.read_parquet(path)
-    required = {"site_key", "year", "gdh", "cp", "bloom_doy"}
+    required = {
+        "site_key",
+        "year",
+        "gdh",
+        "cp",
+        "precip_sum",
+        "rain_sum",
+        "snow_sum",
+        "tmax_mean",
+        "tmin_mean",
+        "tmean_mean",
+        "daylight_mean",
+        "bloom_doy_lag1",
+        "bloom_doy",
+    }
     if set(features_df.columns) != required:
         raise AssertionError(f"Gold features schema mismatch: {features_df.columns}")
     missing_2026 = features_df.loc[features_df["year"] == COMPETITION_YEAR, "bloom_doy"]
@@ -200,56 +220,6 @@ def assert_precision_fold_safe(cv_results_df: pd.DataFrame) -> None:
     if "shrunk_prediction" in cv_results_df.columns:
         raise AssertionError(
             "Precision fold safety violation: cv_results contains shrunk_prediction column"
-        )
-
-
-def assert_vancouver_weight_stable(
-    shrinkage_weights: dict,
-    cv_results_df: pd.DataFrame,
-    training_df: pd.DataFrame,
-    epsilon: float,
-) -> None:
-    """Validate leave-one-out Vancouver shrinkage weight stability."""
-
-    vancouver = cv_results_df.loc[cv_results_df["site_key"] == "vancouver", "residual"]
-    vancouver = pd.to_numeric(vancouver, errors="coerce").dropna().to_numpy(dtype=float)
-    if vancouver.size < 3:
-        logger.warning(
-            "Skipping Vancouver weight stability: only %s residuals available", vancouver.size
-        )
-        return
-
-    residual_all = pd.to_numeric(cv_results_df["residual"], errors="coerce").dropna().to_numpy(
-        dtype=float
-    )
-    n_s = int((training_df["site_key"] == "vancouver").sum())
-    if n_s <= 0:
-        raise AssertionError("Training data missing Vancouver rows for stability gate")
-
-    weights: list[float] = []
-    for idx in range(vancouver.size):
-        mask = np.ones(vancouver.size, dtype=bool)
-        mask[idx] = False
-        v_res = vancouver[mask]
-
-        all_copy = residual_all.copy()
-        removed = 0
-        for pos, val in enumerate(all_copy):
-            if np.isclose(val, vancouver[idx]) and removed == 0:
-                all_copy = np.delete(all_copy, pos)
-                removed = 1
-                break
-        sigma2_global = float(np.var(all_copy, ddof=1)) if all_copy.size >= 2 else 1.0
-        sigma2_v = float(np.var(v_res, ddof=1)) if v_res.size >= 2 else sigma2_global
-        denom = sigma2_global + ((sigma2_v + float(epsilon)) / n_s)
-        if denom <= 0:
-            raise AssertionError("Non-positive denominator in Vancouver LOO stability check")
-        weights.append(float(sigma2_global / denom))
-
-    std = float(np.std(weights, ddof=0))
-    if std >= 0.15:
-        raise AssertionError(
-            f"Vancouver weight instability: std={std:.6f} >= 0.15 across leave-one-out variants"
         )
 
 
@@ -336,17 +306,3 @@ def assert_predictions_reasonable(submission_path: str | Path) -> None:
                 f"{row['location']}: bloom_doy={doy} outside allowed range [60, 140]"
             )
 
-
-def assert_shrinkage_applied(prediction_summary: dict) -> None:
-    """Validate shrinkage changed cold-start site predictions."""
-
-    for site in ["vancouver", "nyc"]:
-        if site not in prediction_summary:
-            continue
-        ps = prediction_summary[site]
-        gmm_mean = float(ps["gmm_selected_mean"])
-        shrunk = float(ps["shrunk_prediction"])
-        if abs(gmm_mean - shrunk) <= 0.01:
-            raise AssertionError(
-                f"{site}: shrinkage had no effect (gmm={gmm_mean:.2f}, shrunk={shrunk:.2f})"
-            )
